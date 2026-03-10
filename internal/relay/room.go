@@ -15,6 +15,7 @@ type Room struct {
 	Code         string
 	Bridge       *websocket.Conn
 	Phone        *websocket.Conn
+	OwnerID      string
 	CreatedAt    time.Time
 	LastActivity time.Time
 	mu           sync.Mutex
@@ -55,18 +56,27 @@ func (r *Room) IsFull() bool {
 
 // AddConnection assigns the connection to the next available slot.
 // First connection becomes "bridge", second becomes "phone".
-// Returns error if both slots are already occupied.
-func (r *Room) AddConnection(conn *websocket.Conn) (string, error) {
+// When auth is enabled, userId is validated for room ownership:
+//   - Bridge sets the OwnerID on the room.
+//   - Phone must present the same userId as the bridge (ownership check).
+//
+// Pass an empty userId when auth is disabled; ownership check is skipped.
+// Returns error if both slots are already occupied or ownership mismatch.
+func (r *Room) AddConnection(conn *websocket.Conn, userId string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.Bridge == nil {
 		r.Bridge = conn
+		r.OwnerID = userId
 		r.LastActivity = time.Now()
 		return "bridge", nil
 	}
 
 	if r.Phone == nil {
+		if r.OwnerID != "" && userId != r.OwnerID {
+			return "", errors.New("room ownership mismatch")
+		}
 		r.Phone = conn
 		r.LastActivity = time.Now()
 		return "phone", nil

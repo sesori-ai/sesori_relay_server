@@ -2,24 +2,72 @@ package relay
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"time"
 )
 
 type Server struct {
-	addr        string
-	manager     *RoomManager
-	rateLimiter *RateLimiter
-	httpServer  *http.Server
+	addr           string
+	manager        *RoomManager
+	rateLimiter    *RateLimiter
+	httpServer     *http.Server
+	publicKey      any
+	authBackendURL string
 }
 
-func NewServer(addr string) *Server {
+func NewServer(addr string, authBackendURL string) *Server {
 	return &Server{
-		addr:        addr,
-		manager:     NewRoomManager(),
-		rateLimiter: NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
+		addr:           addr,
+		manager:        NewRoomManager(),
+		rateLimiter:    NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
+		authBackendURL: authBackendURL,
 	}
+}
+
+// FetchPublicKey fetches the RSA public key from the auth backend and stores it.
+// If authBackendURL is empty, this is a no-op (auth disabled).
+func (s *Server) FetchPublicKey() error {
+	if s.authBackendURL == "" {
+		return nil
+	}
+
+	url := s.authBackendURL + "/auth/public-key"
+	resp, err := http.Get(url) //nolint:noctx
+	if err != nil {
+		return fmt.Errorf("failed to fetch public key from %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read public key response: %w", err)
+	}
+
+	block, _ := pem.Decode(body)
+	if block == nil {
+		return fmt.Errorf("failed to decode PEM block from public key response")
+	}
+
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse public key: %w", err)
+	}
+
+	rsaKey, ok := pub.(*rsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("public key is not RSA (got %T)", pub)
+	}
+
+	s.publicKey = rsaKey
+	slog.Info("auth public key loaded successfully")
+	return nil
 }
 
 func (s *Server) Manager() *RoomManager {

@@ -1,12 +1,16 @@
 package relay
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/anthropics/remote-relay/internal/protocol"
 	"github.com/coder/websocket"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const maxMessageSize = 32 * 1024 * 1024 // 32 MiB — session data can be large
@@ -42,6 +46,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(maxMessageSize)
 	defer s.rateLimiter.ReleaseConnection(ip)
 
+	ctx := r.Context()
+
+	// Auth step: require AuthMessage with valid JWT within 5 seconds.
+	// Skipped when auth is disabled (publicKey is nil).
+	var userId string
+	if s.publicKey != nil {
+		userId, err = s.authenticateConnection(ctx, conn)
+		if err != nil {
+			// Connection already closed with appropriate code inside authenticateConnection.
+			return
+		}
+	}
+
 	room, exists := s.manager.GetRoom(roomCode)
 	if !exists {
 		if !s.rateLimiter.AllowRoom(s.manager.RoomCount()) {
@@ -59,14 +76,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role, addErr := room.AddConnection(conn)
+	role, addErr := room.AddConnection(conn, userId)
 	if addErr != nil {
-		_ = conn.Close(websocket.StatusCode(protocol.CloseRoomFull), "room full")
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), addErr.Error())
 		return
 	}
 	slog.Debug("connection joined room", "room", roomCode, "role", role)
-
-	ctx := r.Context()
 
 	defer func() {
 		peer := room.Peer(conn)
@@ -89,4 +104,62 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+}
+
+// authenticateConnection reads the first WebSocket message and validates it as an
+// AuthMessage containing a valid RS256 JWT. The connection is closed with an
+// appropriate close code on any failure. Returns the userId claim on success.
+func (s *Server) authenticateConnection(ctx context.Context, conn *websocket.Conn) (string, error) {
+	authCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	_, data, err := conn.Read(authCtx)
+	if err != nil {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthRequired), "auth timeout")
+		return "", fmt.Errorf("auth read failed: %w", err)
+	}
+
+	parsed, err := protocol.ParseMessage(data)
+	if err != nil {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "expected auth message")
+		return "", fmt.Errorf("failed to parse auth message: %w", err)
+	}
+
+	authMsg, ok := parsed.(protocol.AuthMessage)
+	if !ok {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "expected auth message")
+		return "", fmt.Errorf("expected AuthMessage, got %T", parsed)
+	}
+
+	token, err := jwt.Parse(authMsg.Token, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return s.publicKey, nil
+	})
+	if err != nil {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), fmt.Sprintf("invalid token: %v", err))
+		return "", fmt.Errorf("JWT verification failed: %w", err)
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid token claims")
+		return "", fmt.Errorf("invalid JWT claims type")
+	}
+
+	userIdClaim, ok := claims["userId"]
+	if !ok {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "missing userId claim")
+		return "", fmt.Errorf("missing userId claim in JWT")
+	}
+
+	userId, ok := userIdClaim.(string)
+	if !ok {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid userId claim")
+		return "", fmt.Errorf("userId claim is not a string")
+	}
+
+	slog.Debug("connection authenticated", "userId", userId)
+	return userId, nil
 }
