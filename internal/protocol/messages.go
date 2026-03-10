@@ -16,6 +16,11 @@ type KeyExchangeMessage struct {
 	PublicKey string `json:"publicKey"` // base64url-encoded X25519 public key
 }
 
+// AuthMessage - client sends this plaintext as first message after WebSocket connect
+type AuthMessage struct {
+	Token string `json:"token"`
+}
+
 // ReadyMessage - bridge sends this encrypted to phone as proof of correct key
 type ReadyMessage struct {
 	Type string `json:"type"` // "ready"
@@ -23,10 +28,10 @@ type ReadyMessage struct {
 
 // RequestMessage - phone sends HTTP request to bridge
 type RequestMessage struct {
-	ID      string            `json:"id"`      // UUID
-	Type    string            `json:"type"`    // "request"
-	Method  string            `json:"method"`  // GET, POST, etc.
-	Path    string            `json:"path"`    // /global/health
+	ID      string            `json:"id"`     // UUID
+	Type    string            `json:"type"`   // "request"
+	Method  string            `json:"method"` // GET, POST, etc.
+	Path    string            `json:"path"`   // /global/health
 	Headers map[string]string `json:"headers"`
 	Body    *string           `json:"body"` // nullable
 }
@@ -65,6 +70,13 @@ func ParseMessage(data []byte) (interface{}, error) {
 	}
 
 	switch envelope.Type {
+	case "auth":
+		var msg AuthMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal auth message: %w", err)
+		}
+		return msg, nil
+
 	case "key_exchange":
 		var msg KeyExchangeMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
