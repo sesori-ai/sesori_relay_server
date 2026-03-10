@@ -85,10 +85,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
-		if msgType != websocket.MessageBinary {
-			continue
-		}
-		if err := room.Forward(conn, data); err != nil {
+		if err := room.ForwardWithType(conn, msgType, data); err != nil {
 			break
 		}
 	}

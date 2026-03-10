@@ -24,6 +24,13 @@ type Room struct {
 // If sender is Bridge, message is forwarded to Phone and vice versa.
 // Returns error if peer is nil.
 func (r *Room) Forward(sender *websocket.Conn, msg []byte) error {
+	return r.ForwardWithType(sender, websocket.MessageBinary, msg)
+}
+
+// ForwardWithType sends a message with the given WebSocket message type to the
+// peer of the sender. Used to forward both text (key exchange) and binary
+// (encrypted data) messages.
+func (r *Room) ForwardWithType(sender *websocket.Conn, msgType websocket.MessageType, msg []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -32,7 +39,7 @@ func (r *Room) Forward(sender *websocket.Conn, msg []byte) error {
 		return errors.New("peer is not connected")
 	}
 
-	if err := peer.Write(context.Background(), websocket.MessageBinary, msg); err != nil {
+	if err := peer.Write(context.Background(), msgType, msg); err != nil {
 		return fmt.Errorf("failed to forward message: %w", err)
 	}
 
