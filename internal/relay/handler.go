@@ -9,7 +9,7 @@ import (
 	"github.com/coder/websocket"
 )
 
-const maxMessageSize = 1048576
+const maxMessageSize = 32 * 1024 * 1024 // 32 MiB — session data can be large
 
 func clientIP(remoteAddr string) string {
 	ip, _, err := net.SplitHostPort(remoteAddr)
