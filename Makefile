@@ -1,18 +1,13 @@
-.PHONY: build-relay build-bridge build-all run-relay run-bridge clean docker-build docker-run docker-push
+.PHONY: build run clean docker-build docker-run docker-push vet
 
-build-relay:
+build:
 	go build -o bin/relay ./cmd/relay
 
-build-bridge:
-	go build -o bin/bridge ./cmd/bridge
-
-build-all: build-relay build-bridge
-
-run-relay: build-relay
+run: build
 	./bin/relay
 
-run-bridge: build-bridge
-	./bin/bridge
+vet:
+	go vet ./...
 
 clean:
 	rm -rf bin/

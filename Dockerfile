@@ -19,9 +19,6 @@ COPY . .
 # Build relay server
 RUN CGO_ENABLED=0 go build -o /relay ./cmd/relay/
 
-# Build bridge CLI
-RUN CGO_ENABLED=0 go build -o /bridge ./cmd/bridge/
-
 # Stage 2: Runtime
 FROM alpine:3.19
 
@@ -32,12 +29,11 @@ RUN apk add --no-cache ca-certificates
 RUN addgroup -g 1000 relay && \
     adduser -D -u 1000 -G relay relay
 
-# Copy binaries from builder
+# Copy binary from builder
 COPY --from=builder /relay /usr/local/bin/relay
-COPY --from=builder /bridge /usr/local/bin/bridge
 
 # Set ownership
-RUN chown -R relay:relay /usr/local/bin/relay /usr/local/bin/bridge
+RUN chown relay:relay /usr/local/bin/relay
 
 # Switch to non-root user
 USER relay

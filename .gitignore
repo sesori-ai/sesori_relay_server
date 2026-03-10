@@ -1,8 +1,8 @@
 bin/
 /relay
-/bridge
 *.exe
 .idea/
 .vscode/
 vendor/
 *.gitkeep
+.env
