@@ -54,6 +54,24 @@ func (m *RoomManager) CreateRoom() (string, *Room, error) {
 	return "", nil, errors.New("failed to generate unique room code after max retries")
 }
 
+func (m *RoomManager) CreateRoomWithCode(code string) (*Room, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if existing, exists := m.rooms[code]; exists {
+		return existing, nil
+	}
+
+	now := time.Now()
+	room := &Room{
+		Code:         code,
+		CreatedAt:    now,
+		LastActivity: now,
+	}
+	m.rooms[code] = room
+	return room, nil
+}
+
 func (m *RoomManager) GetRoom(code string) (*Room, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
