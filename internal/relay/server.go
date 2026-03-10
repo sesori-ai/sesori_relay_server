@@ -29,6 +29,7 @@ func (s *Server) Manager() *RoomManager {
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws/{roomCode}", s.handleWebSocket)
+	mux.HandleFunc("GET /status", handleStatus)
 	mux.HandleFunc("GET /health", s.handleHealth)
 
 	s.httpServer = &http.Server{
@@ -53,6 +54,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	return s.httpServer.Shutdown(ctx)
+}
+
+func handleStatus(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
