@@ -1,0 +1,11 @@
+.git
+.gitignore
+bin/
+*.md
+.sisyphus/
+relay
+bridge
+.vscode/
+.idea/
+vendor/
+*.exe
