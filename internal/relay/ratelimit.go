@@ -1,0 +1,46 @@
+package relay
+
+import (
+	"sync"
+	"sync/atomic"
+)
+
+const (
+	defaultMaxPerIP = 10
+	defaultMaxRooms = 10000
+)
+
+type RateLimiter struct {
+	maxPerIP int
+	maxRooms int
+	counts   sync.Map
+}
+
+func NewRateLimiter(maxPerIP, maxRooms int) *RateLimiter {
+	return &RateLimiter{
+		maxPerIP: maxPerIP,
+		maxRooms: maxRooms,
+	}
+}
+
+func (rl *RateLimiter) AllowConnection(ip string) bool {
+	actual, _ := rl.counts.LoadOrStore(ip, new(int64))
+	counter := actual.(*int64)
+
+	newVal := atomic.AddInt64(counter, 1)
+	if int(newVal) > rl.maxPerIP {
+		atomic.AddInt64(counter, -1)
+		return false
+	}
+	return true
+}
+
+func (rl *RateLimiter) ReleaseConnection(ip string) {
+	if actual, ok := rl.counts.Load(ip); ok {
+		atomic.AddInt64(actual.(*int64), -1)
+	}
+}
+
+func (rl *RateLimiter) AllowRoom(currentRoomCount int) bool {
+	return currentRoomCount < rl.maxRooms
+}

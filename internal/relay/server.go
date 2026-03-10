@@ -8,15 +8,17 @@ import (
 )
 
 type Server struct {
-	addr       string
-	manager    *RoomManager
-	httpServer *http.Server
+	addr        string
+	manager     *RoomManager
+	rateLimiter *RateLimiter
+	httpServer  *http.Server
 }
 
 func NewServer(addr string) *Server {
 	return &Server{
-		addr:    addr,
-		manager: NewRoomManager(),
+		addr:        addr,
+		manager:     NewRoomManager(),
+		rateLimiter: NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
 	}
 }
 
@@ -55,5 +57,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":      "ok",
+		"rooms":       s.manager.RoomCount(),
+		"connections": s.manager.ConnectionCount(),
+	})
 }
