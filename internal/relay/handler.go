@@ -78,7 +78,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	role, addErr := room.AddConnection(conn, userId)
 	if addErr != nil {
-		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), addErr.Error())
+		closeCode := protocol.CloseAuthFailure
+		if addErr.Error() == "room is full" {
+			closeCode = protocol.CloseRoomFull
+		}
+		_ = conn.Close(websocket.StatusCode(closeCode), addErr.Error())
 		return
 	}
 	slog.Debug("connection joined room", "room", roomCode, "role", role)
