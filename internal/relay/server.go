@@ -18,7 +18,7 @@ type Server struct {
 	manager        *RoomManager
 	rateLimiter    *RateLimiter
 	httpServer     *http.Server
-	publicKey      any
+	publicKey      *rsa.PublicKey
 	authBackendURL string
 }
 
@@ -39,13 +39,14 @@ func (s *Server) FetchPublicKey() error {
 	}
 
 	url := s.authBackendURL + "/auth/public-key"
-	resp, err := http.Get(url) //nolint:noctx
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("failed to fetch public key from %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
 		return fmt.Errorf("failed to read public key response: %w", err)
 	}

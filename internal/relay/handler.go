@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -79,7 +80,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	role, addErr := room.AddConnection(conn, userId)
 	if addErr != nil {
 		closeCode := protocol.CloseAuthFailure
-		if addErr.Error() == "room is full" {
+		if errors.Is(addErr, ErrRoomFull) {
 			closeCode = protocol.CloseRoomFull
 		}
 		_ = conn.Close(websocket.StatusCode(closeCode), addErr.Error())
@@ -159,7 +160,7 @@ func (s *Server) authenticateConnection(ctx context.Context, conn *websocket.Con
 	}
 
 	userId, ok := userIdClaim.(string)
-	if !ok {
+	if !ok || userId == "" {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid userId claim")
 		return "", fmt.Errorf("userId claim is not a string")
 	}

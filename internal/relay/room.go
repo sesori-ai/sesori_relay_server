@@ -21,6 +21,11 @@ type Room struct {
 	mu           sync.Mutex
 }
 
+var (
+	ErrRoomFull          = errors.New("room is full")
+	ErrOwnershipMismatch = errors.New("room ownership mismatch")
+)
+
 // Forward sends a binary message to the peer of the sender.
 // If sender is Bridge, message is forwarded to Phone and vice versa.
 // Returns error if peer is nil.
@@ -67,6 +72,9 @@ func (r *Room) AddConnection(conn *websocket.Conn, userId string) (string, error
 	defer r.mu.Unlock()
 
 	if r.Bridge == nil {
+		if userId != "" && r.OwnerID != "" && r.OwnerID != userId {
+			return "", ErrOwnershipMismatch
+		}
 		r.Bridge = conn
 		r.OwnerID = userId
 		r.LastActivity = time.Now()
@@ -75,14 +83,14 @@ func (r *Room) AddConnection(conn *websocket.Conn, userId string) (string, error
 
 	if r.Phone == nil {
 		if r.OwnerID != "" && userId != r.OwnerID {
-			return "", errors.New("room ownership mismatch")
+			return "", ErrOwnershipMismatch
 		}
 		r.Phone = conn
 		r.LastActivity = time.Now()
 		return "phone", nil
 	}
 
-	return "", errors.New("room is full")
+	return "", ErrRoomFull
 }
 
 func (r *Room) RemoveConnection(conn *websocket.Conn) {
