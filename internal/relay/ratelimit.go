@@ -41,6 +41,6 @@ func (rl *RateLimiter) ReleaseConnection(ip string) {
 	}
 }
 
-func (rl *RateLimiter) AllowRoom(currentRoomCount int) bool {
-	return currentRoomCount < rl.maxRooms
+func (rl *RateLimiter) AllowGroup(currentGroupCount int) bool {
+	return currentGroupCount < rl.maxRooms
 }

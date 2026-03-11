@@ -16,10 +16,33 @@ type KeyExchangeMessage struct {
 	PublicKey string `json:"publicKey"` // base64url-encoded X25519 public key
 }
 
-// AuthMessage - client sends this plaintext as first message after WebSocket connect
-type AuthMessage struct {
+// RoleAuthMessage - client sends this plaintext as first message after WebSocket connect
+type RoleAuthMessage struct {
 	Type  string `json:"type"` // "auth"
 	Token string `json:"token"`
+	Role  string `json:"role"` // "bridge" or "phone"
+}
+
+// PhoneConnectedMessage is sent by relay to bridge when a phone joins.
+type PhoneConnectedMessage struct {
+	Type   string `json:"type"` // "phone_connected"
+	ConnID uint16 `json:"connId"`
+}
+
+// PhoneDisconnectedMessage is sent by relay to bridge when a phone leaves.
+type PhoneDisconnectedMessage struct {
+	Type   string `json:"type"` // "phone_disconnected"
+	ConnID uint16 `json:"connId"`
+}
+
+// BridgeConnectedMessage is sent by relay to phones when bridge is online.
+type BridgeConnectedMessage struct {
+	Type string `json:"type"` // "bridge_connected"
+}
+
+// BridgeDisconnectedMessage is sent by relay to phones when bridge is offline.
+type BridgeDisconnectedMessage struct {
+	Type string `json:"type"` // "bridge_disconnected"
 }
 
 // ReadyMessage - bridge sends this encrypted to phone as proof of correct key
@@ -72,7 +95,7 @@ func ParseMessage(data []byte) (interface{}, error) {
 
 	switch envelope.Type {
 	case "auth":
-		var msg AuthMessage
+		var msg RoleAuthMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal auth message: %w", err)
 		}

@@ -1,35 +1,31 @@
 package relay
 
 import (
-	"errors"
+	"context"
+	"encoding/binary"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
 	"time"
 
+	"github.com/anthropics/remote-relay/internal/auth"
 	"github.com/anthropics/remote-relay/internal/protocol"
 	"github.com/coder/websocket"
 )
 
 const maxMessageSize = 32 * 1024 * 1024 // 32 MiB — session data can be large
 
-func clientIP(remoteAddr string) string {
-	ip, _, err := net.SplitHostPort(remoteAddr)
+func getClientIP(r *http.Request) string {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return remoteAddr
+		return r.RemoteAddr
 	}
 	return ip
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	roomCode := r.PathValue("roomCode")
-
-	if !protocol.ValidateRoomCode(roomCode) {
-		http.Error(w, "invalid room code", http.StatusBadRequest)
-		return
-	}
-
-	ip := clientIP(r.RemoteAddr)
+	ip := getClientIP(r)
 	if !s.rateLimiter.AllowConnection(ip) {
 		http.Error(w, "too many connections", http.StatusTooManyRequests)
 		return
@@ -38,84 +34,220 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
 	if err != nil {
 		s.rateLimiter.ReleaseConnection(ip)
-		slog.Debug("websocket accept failed", "room", roomCode, "err", err)
+		slog.Debug("websocket accept failed", "err", err)
 		return
 	}
-	conn.SetReadLimit(maxMessageSize)
 	defer s.rateLimiter.ReleaseConnection(ip)
-
-	ctx := r.Context()
-
-	// Auth step: require valid credentials within 5 seconds.
-	// Skipped when no authenticator is configured.
-	var userId string
-	if s.authenticator != nil {
-		result, authErr := s.authenticator.Authenticate(ctx, conn)
-		if authErr != nil {
-			// Connection already closed with appropriate code inside Authenticate.
-			return
-		}
-		userId = result.UserID
-
-		// Schedule connection close at token expiry.
-		if remaining := time.Until(result.Expiry); remaining > 0 {
-			go func() {
-				select {
-				case <-time.After(remaining):
-					_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "token expired")
-				case <-ctx.Done():
-				}
-			}()
-		}
-	}
-
-	room, exists := s.manager.GetRoom(roomCode)
-	if !exists {
-		if !s.rateLimiter.AllowRoom(s.manager.RoomCount()) {
-			_ = conn.Close(websocket.StatusTryAgainLater, "server at capacity")
-			return
-		}
-		room, err = s.manager.CreateRoomWithCode(roomCode)
-		if err != nil {
-			slog.Error("failed to create room", "room", roomCode, "err", err)
-			_ = conn.Close(websocket.StatusInternalError, "internal error")
-			return
-		}
-	} else if room.IsFull() {
-		_ = conn.Close(websocket.StatusCode(protocol.CloseRoomFull), "room full")
+	if s.jwtAuth == nil {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthRequired), "auth required")
 		return
 	}
 
-	role, addErr := room.AddConnection(conn, userId)
-	if addErr != nil {
-		closeCode := protocol.CloseAuthFailure
-		if errors.Is(addErr, ErrRoomFull) {
-			closeCode = protocol.CloseRoomFull
-		}
-		_ = conn.Close(websocket.StatusCode(closeCode), addErr.Error())
+	if !s.rateLimiter.AllowGroup(s.manager.Count()) {
+		_ = conn.Close(websocket.StatusPolicyViolation, "rate limited")
 		return
 	}
-	slog.Debug("connection joined room", "room", roomCode, "role", role)
+
+	authMsg, userID, ok := readAndValidateAuth(r.Context(), conn, s.jwtAuth)
+	if !ok {
+		return
+	}
+
+	group := s.manager.GetOrCreateGroup(userID)
+
+	slog.Debug("connection joined group", "userID", userID, "role", authMsg.Role)
+	if authMsg.Role == "bridge" {
+		handleBridge(r.Context(), conn, group, s.manager, userID)
+		return
+	}
+	handlePhone(r.Context(), conn, group, s.manager, userID)
+}
+
+func readAndValidateAuth(ctx context.Context, conn *websocket.Conn, jwtAuth *auth.JWTAuthenticator) (protocol.RoleAuthMessage, string, bool) {
+	authCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	msgType, data, err := conn.Read(authCtx)
+	if err != nil || msgType != websocket.MessageText {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthRequired), "auth required")
+		return protocol.RoleAuthMessage{}, "", false
+	}
+
+	var authMsg protocol.RoleAuthMessage
+	if err := json.Unmarshal(data, &authMsg); err != nil || authMsg.Type != "auth" {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "auth failed")
+		return protocol.RoleAuthMessage{}, "", false
+	}
+
+	if authMsg.Role != "bridge" && authMsg.Role != "phone" {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid role")
+		return protocol.RoleAuthMessage{}, "", false
+	}
+
+	result, err := jwtAuth.Validate(authMsg.Token)
+	if err != nil {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "auth failed")
+		return protocol.RoleAuthMessage{}, "", false
+	}
+
+	return authMsg, result.UserID, true
+}
+
+func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup, manager *GroupManager, userID string) {
+	group.mu.Lock()
+	oldBridge := group.Bridge
+	connCtx, connCancel := context.WithCancel(ctx)
+	newConn := &Connection{Conn: conn, ConnID: 0, Cancel: connCancel}
+	group.Bridge = newConn
+	phones := make([]*Connection, 0, len(group.Phones))
+	for _, p := range group.Phones {
+		phones = append(phones, p)
+	}
+	group.mu.Unlock()
+
+	if oldBridge != nil {
+		oldBridge.Cancel()
+		_ = oldBridge.Conn.Close(websocket.StatusNormalClosure, "replaced")
+	}
+
+	bridgeConnectedMsg, _ := json.Marshal(protocol.BridgeConnectedMessage{Type: "bridge_connected"})
+	for _, phone := range phones {
+		_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeConnectedMsg)
+	}
 
 	defer func() {
-		peer := room.Peer(conn)
-		room.RemoveConnection(conn)
-		if peer != nil {
-			_ = peer.Close(websocket.StatusNormalClosure, "peer disconnected")
+		connCancel()
+		group.mu.Lock()
+		if group.Bridge == newConn {
+			group.Bridge = nil
 		}
-		if room.IsEmpty() {
-			s.manager.RemoveRoom(roomCode)
-			slog.Debug("room removed", "room", roomCode)
+		phones := make([]*Connection, 0, len(group.Phones))
+		for _, p := range group.Phones {
+			phones = append(phones, p)
 		}
+		group.mu.Unlock()
+
+		bridgeDisconnMsg, _ := json.Marshal(protocol.BridgeDisconnectedMessage{Type: "bridge_disconnected"})
+		for _, phone := range phones {
+			_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeDisconnMsg)
+		}
+		manager.RemoveGroupIfEmpty(userID)
 	}()
 
+	conn.SetReadLimit(maxMessageSize)
 	for {
-		msgType, data, err := conn.Read(ctx)
+		msgType, data, err := conn.Read(connCtx)
 		if err != nil {
-			break
+			return
 		}
-		if err := room.ForwardWithType(conn, msgType, data); err != nil {
-			break
+		if msgType == websocket.MessageText {
+			continue
 		}
+		if len(data) < 2 {
+			continue
+		}
+
+		connID := binary.BigEndian.Uint16(data[:2])
+		payload := data[2:]
+
+		if connID == 0 {
+			group.mu.Lock()
+			targets := make([]*Connection, 0, len(group.Phones))
+			for _, phone := range group.Phones {
+				targets = append(targets, phone)
+			}
+			group.mu.Unlock()
+			for _, target := range targets {
+				_ = target.Conn.Write(ctx, websocket.MessageBinary, payload)
+			}
+			continue
+		}
+
+		group.mu.Lock()
+		target := group.Phones[connID]
+		group.mu.Unlock()
+		if target == nil {
+			continue
+		}
+		_ = target.Conn.Write(ctx, websocket.MessageBinary, payload)
+	}
+}
+
+func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup, manager *GroupManager, userID string) {
+	var (
+		connID     uint16
+		bridgeConn *Connection
+		connCtx    context.Context
+		connCancel context.CancelFunc
+	)
+
+	for {
+		id := group.AssignConnID()
+		group.mu.Lock()
+		if len(group.Phones) >= 5 {
+			group.mu.Unlock()
+			_ = conn.Close(websocket.StatusCode(protocol.CloseAccountFull), "account full")
+			return
+		}
+		if _, exists := group.Phones[id]; exists {
+			group.mu.Unlock()
+			continue
+		}
+
+		connCtx, connCancel = context.WithCancel(ctx)
+		phoneConn := &Connection{Conn: conn, ConnID: id, Cancel: connCancel}
+		group.Phones[id] = phoneConn
+		bridgeConn = group.Bridge
+		connID = id
+		group.mu.Unlock()
+		break
+	}
+
+	if bridgeConn != nil {
+		phoneConnMsg, _ := json.Marshal(protocol.PhoneConnectedMessage{Type: "phone_connected", ConnID: connID})
+		_ = bridgeConn.Conn.Write(ctx, websocket.MessageText, phoneConnMsg)
+
+		bridgeConnMsg, _ := json.Marshal(protocol.BridgeConnectedMessage{Type: "bridge_connected"})
+		_ = conn.Write(ctx, websocket.MessageText, bridgeConnMsg)
+	} else {
+		bridgeDisconnMsg, _ := json.Marshal(protocol.BridgeDisconnectedMessage{Type: "bridge_disconnected"})
+		_ = conn.Write(ctx, websocket.MessageText, bridgeDisconnMsg)
+	}
+
+	defer func() {
+		connCancel()
+		group.mu.Lock()
+		delete(group.Phones, connID)
+		bridge := group.Bridge
+		group.mu.Unlock()
+
+		if bridge != nil {
+			phoneDisconnMsg, _ := json.Marshal(protocol.PhoneDisconnectedMessage{Type: "phone_disconnected", ConnID: connID})
+			_ = bridge.Conn.Write(ctx, websocket.MessageText, phoneDisconnMsg)
+		}
+		manager.RemoveGroupIfEmpty(userID)
+	}()
+
+	conn.SetReadLimit(maxMessageSize)
+	for {
+		msgType, data, err := conn.Read(connCtx)
+		if err != nil {
+			return
+		}
+		if msgType == websocket.MessageText {
+			continue
+		}
+
+		group.mu.Lock()
+		bridge := group.Bridge
+		group.mu.Unlock()
+		if bridge == nil {
+			continue
+		}
+
+		framed := make([]byte, 2+len(data))
+		binary.BigEndian.PutUint16(framed[:2], connID)
+		copy(framed[2:], data)
+		_ = bridge.Conn.Write(ctx, websocket.MessageBinary, framed)
 	}
 }

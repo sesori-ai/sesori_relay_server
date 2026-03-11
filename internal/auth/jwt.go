@@ -11,7 +11,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// JWTAuthenticator validates WebSocket connections by reading an AuthMessage
+// JWTAuthenticator validates WebSocket connections by reading an auth message
 // containing a signed RS256 JWT. It verifies the signature against the key
 // store, validates required claims, and returns the authenticated identity.
 type JWTAuthenticator struct {
@@ -23,7 +23,7 @@ func NewJWTAuthenticator(keyStore *KeyStore) *JWTAuthenticator {
 	return &JWTAuthenticator{keyStore: keyStore}
 }
 
-// Authenticate reads the first WebSocket message, validates it as an AuthMessage
+// Authenticate reads the first WebSocket message, validates it as a RoleAuthMessage
 // with a valid RS256 JWT, and returns the authenticated result. On failure the
 // connection is closed with an appropriate close code.
 func (a *JWTAuthenticator) Authenticate(ctx context.Context, conn *websocket.Conn) (AuthResult, error) {
@@ -42,10 +42,10 @@ func (a *JWTAuthenticator) Authenticate(ctx context.Context, conn *websocket.Con
 		return AuthResult{}, fmt.Errorf("failed to parse auth message: %w", err)
 	}
 
-	authMsg, ok := parsed.(protocol.AuthMessage)
+	authMsg, ok := parsed.(protocol.RoleAuthMessage)
 	if !ok {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "expected auth message")
-		return AuthResult{}, fmt.Errorf("expected AuthMessage, got %T", parsed)
+		return AuthResult{}, fmt.Errorf("expected RoleAuthMessage, got %T", parsed)
 	}
 
 	token, err := a.verifyToken(authMsg.Token)
@@ -61,6 +61,20 @@ func (a *JWTAuthenticator) Authenticate(ctx context.Context, conn *websocket.Con
 	}
 
 	slog.Debug("connection authenticated", "userId", result.UserID, "tokenType", tokenType)
+	return result, nil
+}
+
+func (a *JWTAuthenticator) Validate(raw string) (AuthResult, error) {
+	token, err := a.verifyToken(raw)
+	if err != nil {
+		return AuthResult{}, fmt.Errorf("JWT verification failed: %w", err)
+	}
+
+	result, _, err := validateClaims(token)
+	if err != nil {
+		return AuthResult{}, err
+	}
+
 	return result, nil
 }
 
