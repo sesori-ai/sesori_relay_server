@@ -5,20 +5,27 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"github.com/anthropics/remote-relay/internal/auth"
 )
 
+// Server is the relay WebSocket server. It manages rooms, rate limiting, and
+// delegates authentication to the provided Authenticator (nil = auth disabled).
 type Server struct {
-	addr        string
-	manager     *RoomManager
-	rateLimiter *RateLimiter
-	httpServer  *http.Server
+	addr          string
+	manager       *RoomManager
+	rateLimiter   *RateLimiter
+	httpServer    *http.Server
+	authenticator auth.Authenticator
 }
 
-func NewServer(addr string) *Server {
+// NewServer creates a relay server. Pass a nil authenticator to disable auth.
+func NewServer(addr string, authenticator auth.Authenticator) *Server {
 	return &Server{
-		addr:        addr,
-		manager:     NewRoomManager(),
-		rateLimiter: NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
+		addr:          addr,
+		manager:       NewRoomManager(),
+		rateLimiter:   NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
+		authenticator: authenticator,
 	}
 }
 

@@ -15,10 +15,16 @@ type Room struct {
 	Code         string
 	Bridge       *websocket.Conn
 	Phone        *websocket.Conn
+	OwnerID      string
 	CreatedAt    time.Time
 	LastActivity time.Time
 	mu           sync.Mutex
 }
+
+var (
+	ErrRoomFull          = errors.New("room is full")
+	ErrOwnershipMismatch = errors.New("room ownership mismatch")
+)
 
 // Forward sends a binary message to the peer of the sender.
 // If sender is Bridge, message is forwarded to Phone and vice versa.
@@ -54,14 +60,20 @@ func (r *Room) IsFull() bool {
 }
 
 // AddConnection assigns the connection to the next available slot.
-// First connection becomes "bridge", second becomes "phone".
-// Returns error if both slots are already occupied.
-func (r *Room) AddConnection(conn *websocket.Conn) (string, error) {
+// First connection becomes "bridge" and sets room ownership; second becomes "phone".
+// All connections must belong to the room owner when auth is enabled.
+// Pass empty userId when auth is disabled; ownership is not enforced.
+func (r *Room) AddConnection(conn *websocket.Conn, userId string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if !r.canJoin(userId) {
+		return "", ErrOwnershipMismatch
+	}
+
 	if r.Bridge == nil {
 		r.Bridge = conn
+		r.OwnerID = userId
 		r.LastActivity = time.Now()
 		return "bridge", nil
 	}
@@ -72,7 +84,17 @@ func (r *Room) AddConnection(conn *websocket.Conn) (string, error) {
 		return "phone", nil
 	}
 
-	return "", errors.New("room is full")
+	return "", ErrRoomFull
+}
+
+// canJoin reports whether userId is allowed to join this room.
+// Returns true if the room has no owner yet (first connection or auth disabled),
+// or the userId matches the existing owner.
+func (r *Room) canJoin(userId string) bool {
+	if r.OwnerID == "" {
+		return true
+	}
+	return userId == r.OwnerID
 }
 
 func (r *Room) RemoveConnection(conn *websocket.Conn) {

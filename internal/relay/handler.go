@@ -1,9 +1,11 @@
 package relay
 
 import (
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/anthropics/remote-relay/internal/protocol"
 	"github.com/coder/websocket"
@@ -42,6 +44,31 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(maxMessageSize)
 	defer s.rateLimiter.ReleaseConnection(ip)
 
+	ctx := r.Context()
+
+	// Auth step: require valid credentials within 5 seconds.
+	// Skipped when no authenticator is configured.
+	var userId string
+	if s.authenticator != nil {
+		result, authErr := s.authenticator.Authenticate(ctx, conn)
+		if authErr != nil {
+			// Connection already closed with appropriate code inside Authenticate.
+			return
+		}
+		userId = result.UserID
+
+		// Schedule connection close at token expiry.
+		if remaining := time.Until(result.Expiry); remaining > 0 {
+			go func() {
+				select {
+				case <-time.After(remaining):
+					_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "token expired")
+				case <-ctx.Done():
+				}
+			}()
+		}
+	}
+
 	room, exists := s.manager.GetRoom(roomCode)
 	if !exists {
 		if !s.rateLimiter.AllowRoom(s.manager.RoomCount()) {
@@ -59,14 +86,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role, addErr := room.AddConnection(conn)
+	role, addErr := room.AddConnection(conn, userId)
 	if addErr != nil {
-		_ = conn.Close(websocket.StatusCode(protocol.CloseRoomFull), "room full")
+		closeCode := protocol.CloseAuthFailure
+		if errors.Is(addErr, ErrRoomFull) {
+			closeCode = protocol.CloseRoomFull
+		}
+		_ = conn.Close(websocket.StatusCode(closeCode), addErr.Error())
 		return
 	}
 	slog.Debug("connection joined room", "room", roomCode, "role", role)
-
-	ctx := r.Context()
 
 	defer func() {
 		peer := room.Peer(conn)
