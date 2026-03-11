@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/anthropics/remote-relay/internal/auth"
 	"github.com/anthropics/remote-relay/internal/relay"
 )
 
@@ -38,14 +40,18 @@ func main() {
 
 	slog.Info("starting relay server", "addr", *addr, "log-level", *logLevel)
 
-	server := relay.NewServer(*addr, *authBackendURL)
-
+	var authenticator auth.Authenticator
 	if *authBackendURL != "" {
-		if err := server.FetchPublicKey(); err != nil {
+		keyStore := auth.NewKeyStore(*authBackendURL + "/auth/public-key")
+		if err := keyStore.Load(); err != nil {
 			slog.Error("failed to fetch auth public key", "err", err)
 			os.Exit(1)
 		}
+		keyStore.StartPeriodicRefresh(ctx, 5*time.Minute)
+		authenticator = auth.NewJWTAuthenticator(keyStore)
 	}
+
+	server := relay.NewServer(*addr, authenticator)
 
 	if err := server.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server error", "err", err)

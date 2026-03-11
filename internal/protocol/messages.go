@@ -18,6 +18,7 @@ type KeyExchangeMessage struct {
 
 // AuthMessage - client sends this plaintext as first message after WebSocket connect
 type AuthMessage struct {
+	Type  string `json:"type"` // "auth"
 	Token string `json:"token"`
 }
 
