@@ -1,0 +1,534 @@
+package relay
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/binary"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/anthropics/remote-relay/internal/auth"
+	"github.com/anthropics/remote-relay/internal/protocol"
+	"github.com/coder/websocket"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+type testEnv struct {
+	relay      *Server
+	httpServer *httptest.Server
+	privateKey *rsa.PrivateKey
+}
+
+func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+
+	pubDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("MarshalPKIXPublicKey: %v", err)
+	}
+	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
+
+	keyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(pubPEM)
+	}))
+	t.Cleanup(keyServer.Close)
+
+	ks := auth.NewKeyStore(keyServer.URL)
+	if err := ks.Load(); err != nil {
+		t.Fatalf("KeyStore.Load: %v", err)
+	}
+
+	jwtAuth := auth.NewJWTAuthenticator(ks)
+	relayServer := NewServer(":0", jwtAuth)
+
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		relayServer.handleWebSocket(w, r)
+	}))
+	t.Cleanup(httpSrv.Close)
+
+	return &testEnv{
+		relay:      relayServer,
+		httpServer: httpSrv,
+		privateKey: privateKey,
+	}
+}
+
+func (e *testEnv) wsURL() string {
+	return "ws" + strings.TrimPrefix(e.httpServer.URL, "http") + "/"
+}
+
+func (e *testEnv) makeToken(userID string) string {
+	claims := jwt.MapClaims{
+		"userId":    userID,
+		"tokenType": "access",
+		"aud":       "mobile",
+		"iss":       "auth-backend",
+		"exp":       float64(time.Now().Add(time.Hour).Unix()),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	signed, err := token.SignedString(e.privateKey)
+	if err != nil {
+		panic(fmt.Sprintf("SignedString: %v", err))
+	}
+	return signed
+}
+
+func (e *testEnv) dial(ctx context.Context) (*websocket.Conn, error) {
+	conn, _, err := websocket.Dial(ctx, e.wsURL(), nil)
+	return conn, err
+}
+
+func sendAuth(ctx context.Context, conn *websocket.Conn, token, role string) error {
+	msg := fmt.Sprintf(`{"type":"auth","token":"%s","role":"%s"}`, token, role)
+	return conn.Write(ctx, websocket.MessageText, []byte(msg))
+}
+
+func (e *testEnv) connectBridge(t *testing.T, userID string) *websocket.Conn {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := e.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial bridge: %v", err)
+	}
+	if err := sendAuth(ctx, conn, e.makeToken(userID), "bridge"); err != nil {
+		conn.CloseNow()
+		t.Fatalf("sendAuth bridge: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	return conn
+}
+
+func (e *testEnv) connectPhone(t *testing.T, userID string) (*websocket.Conn, []byte) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := e.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial phone: %v", err)
+	}
+	if err := sendAuth(ctx, conn, e.makeToken(userID), "phone"); err != nil {
+		conn.CloseNow()
+		t.Fatalf("sendAuth phone: %v", err)
+	}
+	firstMsg := readTextMsg(t, conn, 2*time.Second)
+	return conn, firstMsg
+}
+
+func readTextMsg(t *testing.T, conn *websocket.Conn, timeout time.Duration) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	msgType, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("readTextMsg: %v", err)
+	}
+	if msgType != websocket.MessageText {
+		t.Fatalf("expected text message, got type %d", msgType)
+	}
+	return data
+}
+
+func readBinaryMsg(t *testing.T, conn *websocket.Conn, timeout time.Duration) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	msgType, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("readBinaryMsg: %v", err)
+	}
+	if msgType != websocket.MessageBinary {
+		t.Fatalf("expected binary message, got type %d", msgType)
+	}
+	return data
+}
+
+func expectClose(t *testing.T, conn *websocket.Conn, expected websocket.StatusCode) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err := conn.Read(ctx)
+	if err == nil {
+		t.Fatal("expected connection to be closed, but read succeeded")
+	}
+	code := websocket.CloseStatus(err)
+	if code != expected {
+		t.Errorf("expected close code %d, got %d (err: %v)", expected, code, err)
+	}
+}
+
+func expectAnyClose(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err := conn.Read(ctx)
+	if err == nil {
+		t.Fatal("expected connection to be closed, but read succeeded")
+	}
+}
+
+func expectNoMsg(t *testing.T, conn *websocket.Conn, timeout time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_, _, err := conn.Read(ctx)
+	if err == nil {
+		t.Error("expected no message but received one")
+	}
+}
+
+func parseJSON(t *testing.T, data []byte) map[string]interface{} {
+	t.Helper()
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parseJSON %q: %v", data, err)
+	}
+	return m
+}
+
+func TestHandler_AuthRequired_BinaryMessage(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := conn.Write(ctx, websocket.MessageBinary, []byte("binary")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthRequired))
+}
+
+func TestHandler_AuthFailure_InvalidJSON(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := conn.Write(ctx, websocket.MessageText, []byte("not json")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
+}
+
+func TestHandler_AuthFailure_InvalidToken(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"auth","token":"bad-token","role":"bridge"}`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
+}
+
+func TestHandler_AuthFailure_InvalidRole(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	token := env.makeToken("user123")
+	msg := fmt.Sprintf(`{"type":"auth","token":"%s","role":"admin"}`, token)
+	if err := conn.Write(ctx, websocket.MessageText, []byte(msg)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
+}
+
+func TestHandler_BridgeConnection(t *testing.T) {
+	env := newTestEnv(t)
+
+	bridge := env.connectBridge(t, "user1")
+	defer bridge.CloseNow()
+
+	if env.relay.manager.Count() != 1 {
+		t.Errorf("expected 1 group, got %d", env.relay.manager.Count())
+	}
+}
+
+func TestHandler_BridgeReplacement(t *testing.T) {
+	env := newTestEnv(t)
+
+	bridge1 := env.connectBridge(t, "user1")
+	defer bridge1.CloseNow()
+
+	bridge2 := env.connectBridge(t, "user1")
+	defer bridge2.CloseNow()
+
+	expectAnyClose(t, bridge1)
+
+	if env.relay.manager.Count() != 1 {
+		t.Errorf("expected 1 group after replacement, got %d", env.relay.manager.Count())
+	}
+}
+
+func TestHandler_PhoneNoBridge(t *testing.T) {
+	env := newTestEnv(t)
+
+	phone, firstMsg := env.connectPhone(t, "user1")
+	defer phone.CloseNow()
+
+	m := parseJSON(t, firstMsg)
+	if m["type"] != "bridge_disconnected" {
+		t.Errorf("expected bridge_disconnected, got %q", m["type"])
+	}
+}
+
+func TestHandler_PhoneWithBridge(t *testing.T) {
+	env := newTestEnv(t)
+
+	bridge := env.connectBridge(t, "user1")
+	defer bridge.CloseNow()
+
+	phone, firstMsg := env.connectPhone(t, "user1")
+	defer phone.CloseNow()
+
+	m := parseJSON(t, firstMsg)
+	if m["type"] != "bridge_connected" {
+		t.Errorf("phone expected bridge_connected, got %q", m["type"])
+	}
+
+	bridgeMsg := readTextMsg(t, bridge, 2*time.Second)
+	bm := parseJSON(t, bridgeMsg)
+	if bm["type"] != "phone_connected" {
+		t.Errorf("bridge expected phone_connected, got %q", bm["type"])
+	}
+	if _, ok := bm["connId"]; !ok {
+		t.Error("phone_connected missing connId field")
+	}
+}
+
+func TestHandler_PhoneCap(t *testing.T) {
+	env := newTestEnv(t)
+
+	phones := make([]*websocket.Conn, 5)
+	for i := 0; i < 5; i++ {
+		phones[i], _ = env.connectPhone(t, "user1")
+		defer phones[i].CloseNow()
+	}
+
+	conn6, err := env.dial(context.Background())
+	if err != nil {
+		t.Fatalf("dial 6th phone: %v", err)
+	}
+	defer conn6.CloseNow()
+
+	if err := sendAuth(context.Background(), conn6, env.makeToken("user1"), "phone"); err != nil {
+		t.Fatalf("sendAuth 6th phone: %v", err)
+	}
+	expectClose(t, conn6, websocket.StatusCode(protocol.CloseAccountFull))
+}
+
+func TestHandler_BinaryBroadcast(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	bridge := env.connectBridge(t, "user1")
+	defer bridge.CloseNow()
+
+	phone1, _ := env.connectPhone(t, "user1")
+	defer phone1.CloseNow()
+	readTextMsg(t, bridge, 2*time.Second)
+
+	phone2, _ := env.connectPhone(t, "user1")
+	defer phone2.CloseNow()
+	readTextMsg(t, bridge, 2*time.Second)
+
+	payload := []byte("broadcast-payload")
+	frame := append([]byte{0x00, 0x00}, payload...)
+	if err := bridge.Write(ctx, websocket.MessageBinary, frame); err != nil {
+		t.Fatalf("bridge write: %v", err)
+	}
+
+	msg1 := readBinaryMsg(t, phone1, 2*time.Second)
+	msg2 := readBinaryMsg(t, phone2, 2*time.Second)
+
+	if string(msg1) != string(payload) {
+		t.Errorf("phone1: expected %q, got %q", payload, msg1)
+	}
+	if string(msg2) != string(payload) {
+		t.Errorf("phone2: expected %q, got %q", payload, msg2)
+	}
+}
+
+func TestHandler_BinaryUnicast(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	bridge := env.connectBridge(t, "user1")
+	defer bridge.CloseNow()
+
+	phone1, _ := env.connectPhone(t, "user1")
+	defer phone1.CloseNow()
+	readTextMsg(t, bridge, 2*time.Second)
+
+	phone2, _ := env.connectPhone(t, "user1")
+	defer phone2.CloseNow()
+	phone2ConnMsg := readTextMsg(t, bridge, 2*time.Second)
+	pm2 := parseJSON(t, phone2ConnMsg)
+	connID2 := uint16(pm2["connId"].(float64))
+
+	payload := []byte("unicast-payload")
+	frame := make([]byte, 2+len(payload))
+	binary.BigEndian.PutUint16(frame[:2], connID2)
+	copy(frame[2:], payload)
+	if err := bridge.Write(ctx, websocket.MessageBinary, frame); err != nil {
+		t.Fatalf("bridge write: %v", err)
+	}
+
+	msg2 := readBinaryMsg(t, phone2, 2*time.Second)
+	if string(msg2) != string(payload) {
+		t.Errorf("phone2: expected %q, got %q", payload, msg2)
+	}
+
+	expectNoMsg(t, phone1, 200*time.Millisecond)
+}
+
+func TestHandler_PhoneToBridge(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	bridge := env.connectBridge(t, "user1")
+	defer bridge.CloseNow()
+
+	phone, _ := env.connectPhone(t, "user1")
+	defer phone.CloseNow()
+
+	bridgeMsg := readTextMsg(t, bridge, 2*time.Second)
+	bm := parseJSON(t, bridgeMsg)
+	connID := uint16(bm["connId"].(float64))
+
+	payload := []byte("from-phone")
+	if err := phone.Write(ctx, websocket.MessageBinary, payload); err != nil {
+		t.Fatalf("phone write: %v", err)
+	}
+
+	data := readBinaryMsg(t, bridge, 2*time.Second)
+	if len(data) < 2 {
+		t.Fatalf("expected ≥2 bytes, got %d", len(data))
+	}
+	gotConnID := binary.BigEndian.Uint16(data[:2])
+	gotPayload := data[2:]
+
+	if gotConnID != connID {
+		t.Errorf("connId: expected %d, got %d", connID, gotConnID)
+	}
+	if string(gotPayload) != string(payload) {
+		t.Errorf("payload: expected %q, got %q", payload, gotPayload)
+	}
+}
+
+func TestHandler_BridgeDisconnect_NotifiesPhones(t *testing.T) {
+	env := newTestEnv(t)
+
+	bridge := env.connectBridge(t, "user1")
+
+	phone, firstMsg := env.connectPhone(t, "user1")
+	defer phone.CloseNow()
+
+	m := parseJSON(t, firstMsg)
+	if m["type"] != "bridge_connected" {
+		t.Fatalf("phone expected bridge_connected, got %q", m["type"])
+	}
+	readTextMsg(t, bridge, 2*time.Second)
+
+	bridge.CloseNow()
+
+	phoneMsg := readTextMsg(t, phone, 3*time.Second)
+	pm := parseJSON(t, phoneMsg)
+	if pm["type"] != "bridge_disconnected" {
+		t.Errorf("expected bridge_disconnected, got %q", pm["type"])
+	}
+}
+
+func TestHandler_PhoneDisconnect_NotifiesBridge(t *testing.T) {
+	env := newTestEnv(t)
+
+	bridge := env.connectBridge(t, "user1")
+	defer bridge.CloseNow()
+
+	phone, _ := env.connectPhone(t, "user1")
+
+	bridgeMsg := readTextMsg(t, bridge, 2*time.Second)
+	bm := parseJSON(t, bridgeMsg)
+	connID := uint16(bm["connId"].(float64))
+
+	phone.CloseNow()
+
+	bridgeMsg2 := readTextMsg(t, bridge, 3*time.Second)
+	dm := parseJSON(t, bridgeMsg2)
+	if dm["type"] != "phone_disconnected" {
+		t.Errorf("expected phone_disconnected, got %q", dm["type"])
+	}
+	if uint16(dm["connId"].(float64)) != connID {
+		t.Errorf("connId: expected %d, got %v", connID, dm["connId"])
+	}
+}
+
+func TestBinaryFraming_ConnIDParsing(t *testing.T) {
+	cases := []struct {
+		frame    []byte
+		wantID   uint16
+		wantData []byte
+	}{
+		{[]byte{0x00, 0x00, 'a', 'b'}, 0, []byte{'a', 'b'}},
+		{[]byte{0x00, 0x03, 'x'}, 3, []byte{'x'}},
+		{[]byte{0x01, 0x00, 'y'}, 256, []byte{'y'}},
+		{[]byte{0xFF, 0xFF, 'z'}, 65535, []byte{'z'}},
+	}
+
+	for _, c := range cases {
+		gotID := binary.BigEndian.Uint16(c.frame[:2])
+		gotData := c.frame[2:]
+		if gotID != c.wantID {
+			t.Errorf("frame %v: connId expected %d, got %d", c.frame[:2], c.wantID, gotID)
+		}
+		if string(gotData) != string(c.wantData) {
+			t.Errorf("frame %v: data expected %q, got %q", c.frame[:2], c.wantData, gotData)
+		}
+	}
+}
+
+func TestBinaryFraming_PhonePrepend(t *testing.T) {
+	connID := uint16(42)
+	payload := []byte("hello")
+
+	framed := make([]byte, 2+len(payload))
+	binary.BigEndian.PutUint16(framed[:2], connID)
+	copy(framed[2:], payload)
+
+	if binary.BigEndian.Uint16(framed[:2]) != connID {
+		t.Errorf("expected connId %d in prefix", connID)
+	}
+	if string(framed[2:]) != string(payload) {
+		t.Errorf("expected payload %q after prefix", payload)
+	}
+}
