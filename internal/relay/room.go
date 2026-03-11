@@ -60,21 +60,18 @@ func (r *Room) IsFull() bool {
 }
 
 // AddConnection assigns the connection to the next available slot.
-// First connection becomes "bridge", second becomes "phone".
-// When auth is enabled, userId is validated for room ownership:
-//   - Bridge sets the OwnerID on the room.
-//   - Phone must present the same userId as the bridge (ownership check).
-//
-// Pass an empty userId when auth is disabled; ownership check is skipped.
-// Returns error if both slots are already occupied or ownership mismatch.
+// First connection becomes "bridge" and sets room ownership; second becomes "phone".
+// All connections must belong to the room owner when auth is enabled.
+// Pass empty userId when auth is disabled; ownership is not enforced.
 func (r *Room) AddConnection(conn *websocket.Conn, userId string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if !r.canJoin(userId) {
+		return "", ErrOwnershipMismatch
+	}
+
 	if r.Bridge == nil {
-		if userId != "" && r.OwnerID != "" && r.OwnerID != userId {
-			return "", ErrOwnershipMismatch
-		}
 		r.Bridge = conn
 		r.OwnerID = userId
 		r.LastActivity = time.Now()
@@ -82,15 +79,22 @@ func (r *Room) AddConnection(conn *websocket.Conn, userId string) (string, error
 	}
 
 	if r.Phone == nil {
-		if r.OwnerID != "" && userId != r.OwnerID {
-			return "", ErrOwnershipMismatch
-		}
 		r.Phone = conn
 		r.LastActivity = time.Now()
 		return "phone", nil
 	}
 
 	return "", ErrRoomFull
+}
+
+// canJoin reports whether userId is allowed to join this room.
+// Returns true if the room has no owner yet (first connection or auth disabled),
+// or the userId matches the existing owner.
+func (r *Room) canJoin(userId string) bool {
+	if r.OwnerID == "" {
+		return true
+	}
+	return userId == r.OwnerID
 }
 
 func (r *Room) RemoveConnection(conn *websocket.Conn) {
