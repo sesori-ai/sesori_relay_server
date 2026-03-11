@@ -52,11 +52,26 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Auth step: require AuthMessage with valid JWT within 5 seconds.
 	// Skipped when auth is disabled (publicKey is nil).
 	var userId string
-	if s.publicKey != nil {
-		userId, err = s.authenticateConnection(ctx, conn)
+	var expiry time.Time
+	s.keyMu.RLock()
+	hasPublicKey := s.publicKey != nil
+	s.keyMu.RUnlock()
+	if hasPublicKey {
+		userId, expiry, err = s.authenticateConnection(ctx, conn)
 		if err != nil {
 			// Connection already closed with appropriate code inside authenticateConnection.
 			return
+		}
+
+		remaining := time.Until(expiry)
+		if remaining > 0 {
+			go func() {
+				select {
+				case <-time.After(remaining):
+					_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "token expired")
+				case <-ctx.Done():
+				}
+			}()
 		}
 	}
 
@@ -113,58 +128,133 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // authenticateConnection reads the first WebSocket message and validates it as an
 // AuthMessage containing a valid RS256 JWT. The connection is closed with an
-// appropriate close code on any failure. Returns the userId claim on success.
-func (s *Server) authenticateConnection(ctx context.Context, conn *websocket.Conn) (string, error) {
+// appropriate close code on any failure. Returns the userId claim and token expiry on success.
+func (s *Server) authenticateConnection(ctx context.Context, conn *websocket.Conn) (string, time.Time, error) {
 	authCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	_, data, err := conn.Read(authCtx)
 	if err != nil {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthRequired), "auth timeout")
-		return "", fmt.Errorf("auth read failed: %w", err)
+		return "", time.Time{}, fmt.Errorf("auth read failed: %w", err)
 	}
 
 	parsed, err := protocol.ParseMessage(data)
 	if err != nil {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "expected auth message")
-		return "", fmt.Errorf("failed to parse auth message: %w", err)
+		return "", time.Time{}, fmt.Errorf("failed to parse auth message: %w", err)
 	}
 
 	authMsg, ok := parsed.(protocol.AuthMessage)
 	if !ok {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "expected auth message")
-		return "", fmt.Errorf("expected AuthMessage, got %T", parsed)
+		return "", time.Time{}, fmt.Errorf("expected AuthMessage, got %T", parsed)
 	}
 
-	token, err := jwt.Parse(authMsg.Token, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+	parseToken := func() (*jwt.Token, error) {
+		return jwt.Parse(authMsg.Token, func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+			}
+
+			s.keyMu.RLock()
+			key := s.publicKey
+			s.keyMu.RUnlock()
+			return key, nil
+		})
+	}
+
+	token, err := parseToken()
+	if err != nil {
+		if refreshErr := s.refreshPublicKey(); refreshErr != nil {
+			slog.Warn("failed to refresh auth public key after JWT verification failure", "err", refreshErr)
+		} else {
+			token, err = parseToken()
 		}
-		return s.publicKey, nil
-	})
+	}
 	if err != nil {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), fmt.Sprintf("invalid token: %v", err))
-		return "", fmt.Errorf("JWT verification failed: %w", err)
+		return "", time.Time{}, fmt.Errorf("JWT verification failed: %w", err)
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid token claims")
-		return "", fmt.Errorf("invalid JWT claims type")
+		return "", time.Time{}, fmt.Errorf("invalid JWT claims type")
 	}
 
 	userIdClaim, ok := claims["userId"]
 	if !ok {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "missing userId claim")
-		return "", fmt.Errorf("missing userId claim in JWT")
+		return "", time.Time{}, fmt.Errorf("missing userId claim in JWT")
 	}
 
 	userId, ok := userIdClaim.(string)
 	if !ok || userId == "" {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid userId claim")
-		return "", fmt.Errorf("userId claim is not a string")
+		return "", time.Time{}, fmt.Errorf("userId claim is not a string")
 	}
 
-	slog.Debug("connection authenticated", "userId", userId)
-	return userId, nil
+	tokenTypeClaim, ok := claims["tokenType"]
+	if !ok {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "missing tokenType claim")
+		return "", time.Time{}, fmt.Errorf("missing tokenType claim in JWT")
+	}
+
+	tokenType, ok := tokenTypeClaim.(string)
+	if !ok || (tokenType != "access" && tokenType != "bridge") {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid tokenType claim")
+		return "", time.Time{}, fmt.Errorf("invalid tokenType claim: %v", tokenTypeClaim)
+	}
+
+	audClaim, ok := claims["aud"]
+	if !ok {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "missing aud claim")
+		return "", time.Time{}, fmt.Errorf("missing aud claim in JWT")
+	}
+
+	var audience string
+	switch v := audClaim.(type) {
+	case string:
+		audience = v
+	case []interface{}:
+		if len(v) == 1 {
+			audValue, ok := v[0].(string)
+			if ok {
+				audience = audValue
+			}
+		}
+	}
+	if audience != "mobile" && audience != "bridge" {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid aud claim")
+		return "", time.Time{}, fmt.Errorf("invalid aud claim: %v", audClaim)
+	}
+
+	issClaim, ok := claims["iss"]
+	if !ok {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "missing iss claim")
+		return "", time.Time{}, fmt.Errorf("missing iss claim in JWT")
+	}
+
+	issuer, ok := issClaim.(string)
+	if !ok || issuer != "auth-backend" {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid iss claim")
+		return "", time.Time{}, fmt.Errorf("invalid iss claim: %v", issClaim)
+	}
+
+	expClaim, ok := claims["exp"]
+	if !ok {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "missing exp claim")
+		return "", time.Time{}, fmt.Errorf("missing exp claim in JWT")
+	}
+
+	expFloat, ok := expClaim.(float64)
+	if !ok {
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid exp claim")
+		return "", time.Time{}, fmt.Errorf("exp claim is not a number: %T", expClaim)
+	}
+
+	expiry := time.Unix(int64(expFloat), 0)
+	slog.Debug("connection authenticated", "userId", userId, "tokenType", tokenType)
+	return userId, expiry, nil
 }
