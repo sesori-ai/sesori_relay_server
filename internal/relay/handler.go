@@ -17,6 +17,7 @@ import (
 const (
 	maxMessageSize      = 32 * 1024 * 1024 // 32 MiB — session data can be large
 	maxPhonesPerAccount = 5
+	pingInterval        = 30 * time.Second
 )
 
 var (
@@ -101,6 +102,24 @@ func readAndValidateAuth(ctx context.Context, conn *websocket.Conn, jwtAuth *aut
 	return authMsg, result.UserID, true
 }
 
+func startPingLoop(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn) {
+	go func() {
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := conn.Ping(ctx); err != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+}
+
 func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup, manager *GroupManager, userID string) {
 	group.mu.Lock()
 	oldBridge := group.Bridge
@@ -108,6 +127,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 	newConn := &Connection{Conn: conn, ConnID: 0, Cancel: connCancel}
 	group.Bridge = newConn
 	group.mu.Unlock()
+	startPingLoop(connCtx, connCancel, conn)
 
 	phones := group.AllPhones()
 
@@ -198,6 +218,8 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 		group.mu.Unlock()
 		break
 	}
+
+	startPingLoop(connCtx, connCancel, conn)
 
 	if bridgeConn != nil {
 		phoneConnMsg, err := json.Marshal(protocol.PhoneConnectedMessage{Type: protocol.TypePhoneConnected, ConnID: connID})
