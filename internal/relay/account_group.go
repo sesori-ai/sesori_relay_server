@@ -41,3 +41,21 @@ func (g *AccountGroup) AssignConnID() uint16 {
 
 	return id
 }
+
+// AllPhones returns a snapshot slice of all phone connections.
+func (g *AccountGroup) AllPhones() []*Connection {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	phones := make([]*Connection, 0, len(g.Phones))
+	for _, p := range g.Phones {
+		phones = append(phones, p)
+	}
+	return phones
+}
+
+// IsEmpty returns true if the group has no bridge and no phone connections.
+func (g *AccountGroup) IsEmpty() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.Bridge == nil && len(g.Phones) == 0
+}

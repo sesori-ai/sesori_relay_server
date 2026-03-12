@@ -31,11 +31,7 @@ func (m *GroupManager) RemoveGroupIfEmpty(userID string) {
 	defer m.mu.Unlock()
 
 	if g, ok := m.groups[userID]; ok {
-		g.mu.Lock()
-		empty := g.Bridge == nil && len(g.Phones) == 0
-		g.mu.Unlock()
-
-		if empty {
+		if g.IsEmpty() {
 			delete(m.groups, userID)
 		}
 	}

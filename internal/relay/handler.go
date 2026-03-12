@@ -14,7 +14,15 @@ import (
 	"github.com/coder/websocket"
 )
 
-const maxMessageSize = 32 * 1024 * 1024 // 32 MiB — session data can be large
+const (
+	maxMessageSize      = 32 * 1024 * 1024 // 32 MiB — session data can be large
+	maxPhonesPerAccount = 5
+)
+
+var (
+	bridgeConnectedJSON, _    = json.Marshal(protocol.BridgeConnectedMessage{Type: protocol.TypeBridgeConnected})
+	bridgeDisconnectedJSON, _ = json.Marshal(protocol.BridgeDisconnectedMessage{Type: protocol.TypeBridgeDisconnected})
+)
 
 func getClientIP(r *http.Request) string {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -99,20 +107,17 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 	connCtx, connCancel := context.WithCancel(ctx)
 	newConn := &Connection{Conn: conn, ConnID: 0, Cancel: connCancel}
 	group.Bridge = newConn
-	phones := make([]*Connection, 0, len(group.Phones))
-	for _, p := range group.Phones {
-		phones = append(phones, p)
-	}
 	group.mu.Unlock()
+
+	phones := group.AllPhones()
 
 	if oldBridge != nil {
 		oldBridge.Cancel()
 		_ = oldBridge.Conn.Close(websocket.StatusNormalClosure, "replaced")
 	}
 
-	bridgeConnectedMsg, _ := json.Marshal(protocol.BridgeConnectedMessage{Type: protocol.TypeBridgeConnected})
 	for _, phone := range phones {
-		_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeConnectedMsg)
+		_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeConnectedJSON)
 	}
 
 	defer func() {
@@ -121,15 +126,11 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		if group.Bridge == newConn {
 			group.Bridge = nil
 		}
-		phones := make([]*Connection, 0, len(group.Phones))
-		for _, p := range group.Phones {
-			phones = append(phones, p)
-		}
 		group.mu.Unlock()
 
-		bridgeDisconnMsg, _ := json.Marshal(protocol.BridgeDisconnectedMessage{Type: protocol.TypeBridgeDisconnected})
+		phones := group.AllPhones()
 		for _, phone := range phones {
-			_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeDisconnMsg)
+			_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeDisconnectedJSON)
 		}
 		manager.RemoveGroupIfEmpty(userID)
 	}()
@@ -151,12 +152,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		payload := data[2:]
 
 		if connID == 0 {
-			group.mu.Lock()
-			targets := make([]*Connection, 0, len(group.Phones))
-			for _, phone := range group.Phones {
-				targets = append(targets, phone)
-			}
-			group.mu.Unlock()
+			targets := group.AllPhones()
 			for _, target := range targets {
 				_ = target.Conn.Write(ctx, websocket.MessageBinary, payload)
 			}
@@ -184,7 +180,7 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 	for {
 		id := group.AssignConnID()
 		group.mu.Lock()
-		if len(group.Phones) >= 5 {
+		if len(group.Phones) >= maxPhonesPerAccount {
 			group.mu.Unlock()
 			_ = conn.Close(websocket.StatusCode(protocol.CloseAccountFull), "account full")
 			return
@@ -204,14 +200,15 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 	}
 
 	if bridgeConn != nil {
-		phoneConnMsg, _ := json.Marshal(protocol.PhoneConnectedMessage{Type: protocol.TypePhoneConnected, ConnID: connID})
+		phoneConnMsg, err := json.Marshal(protocol.PhoneConnectedMessage{Type: protocol.TypePhoneConnected, ConnID: connID})
+		if err != nil {
+			slog.Error("failed to marshal phone_connected", "err", err)
+			return
+		}
 		_ = bridgeConn.Conn.Write(ctx, websocket.MessageText, phoneConnMsg)
-
-		bridgeConnMsg, _ := json.Marshal(protocol.BridgeConnectedMessage{Type: protocol.TypeBridgeConnected})
-		_ = conn.Write(ctx, websocket.MessageText, bridgeConnMsg)
+		_ = conn.Write(ctx, websocket.MessageText, bridgeConnectedJSON)
 	} else {
-		bridgeDisconnMsg, _ := json.Marshal(protocol.BridgeDisconnectedMessage{Type: protocol.TypeBridgeDisconnected})
-		_ = conn.Write(ctx, websocket.MessageText, bridgeDisconnMsg)
+		_ = conn.Write(ctx, websocket.MessageText, bridgeDisconnectedJSON)
 	}
 
 	defer func() {
@@ -222,7 +219,11 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 		group.mu.Unlock()
 
 		if bridge != nil {
-			phoneDisconnMsg, _ := json.Marshal(protocol.PhoneDisconnectedMessage{Type: protocol.TypePhoneDisconnected, ConnID: connID})
+			phoneDisconnMsg, err := json.Marshal(protocol.PhoneDisconnectedMessage{Type: protocol.TypePhoneDisconnected, ConnID: connID})
+			if err != nil {
+				slog.Error("failed to marshal phone_disconnected", "err", err)
+				return
+			}
 			_ = bridge.Conn.Write(ctx, websocket.MessageText, phoneDisconnMsg)
 		}
 		manager.RemoveGroupIfEmpty(userID)
