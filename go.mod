@@ -1,4 +1,4 @@
-module github.com/anthropics/remote-relay
+module github.com/sesori-ai/sesori_relay_server
 
 go 1.23
 

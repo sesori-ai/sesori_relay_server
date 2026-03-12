@@ -25,7 +25,7 @@ Fly.io provides a simple, scalable deployment platform with automatic TLS.
    ```bash
    fly launch
    ```
-   - Choose an app name (e.g., `remote-relay`)
+   - Choose an app name (e.g., `sesori-relay`)
    - Select a region close to your users
    - Skip database setup
 
@@ -76,8 +76,8 @@ For self-hosted deployments on a VPS (AWS EC2, DigitalOcean, Linode, etc.).
 
 1. **Clone repository:**
    ```bash
-   git clone https://github.com/anthropics/remote-relay.git
-   cd remote-relay
+   git clone https://github.com/sesori-ai/sesori_relay_server.git
+   cd sesori_relay_server
    ```
 
 2. **Create Caddyfile for TLS:**
@@ -124,7 +124,7 @@ The relay server accepts the following flags:
 ### Example: Custom Port
 
 ```bash
-docker run -p 9000:9000 remote-relay --addr :9000
+docker run -p 9000:9000 sesori-relay --addr :9000
 ```
 
 ## Monitoring
@@ -168,7 +168,7 @@ lsof -i :8080
 kill -9 <PID>
 
 # Or use a different port
-docker run -p 9000:8080 remote-relay
+docker run -p 9000:8080 sesori-relay
 ```
 
 ### Container Won't Start

@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/anthropics/remote-relay/internal/auth"
-	"github.com/anthropics/remote-relay/internal/relay"
+	"github.com/sesori-ai/sesori_relay_server/internal/auth"
+	"github.com/sesori-ai/sesori_relay_server/internal/relay"
 )
 
 func main() {

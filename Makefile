@@ -13,10 +13,10 @@ clean:
 	rm -rf bin/
 
 docker-build:
-	docker build -t remote-relay .
+	docker build -t sesori-relay .
 
 docker-run: docker-build
-	docker run -d -p 8080:8080 --name relay remote-relay
+	docker run -d -p 8080:8080 --name relay sesori-relay
 
 docker-push:
-	@echo "Set REGISTRY and run: docker push $${REGISTRY}/remote-relay"
+	@echo "Set REGISTRY and run: docker push $${REGISTRY}/sesori-relay"

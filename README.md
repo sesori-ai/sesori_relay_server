@@ -1,6 +1,6 @@
-# Remote Relay
+# Sesori Relay Server
 
-WebSocket relay server for proxying encrypted traffic between the [OpenCode Bridge CLI](https://github.com/anthropics/opencode-bridge) running on a laptop and the OpenCode mobile app running on a phone.
+WebSocket relay server for proxying encrypted traffic between the [Sesori Bridge CLI](https://github.com/sesori-ai/sesori_bridge) running on a laptop and the [Sesori mobile app](https://github.com/sesori-ai/sesori_mobile) running on a phone.
 
 The relay routes traffic by account — connections are grouped by the `userId` extracted from a JWT token, so a bridge and up to 5 phones belonging to the same account can exchange data without the relay reading any of it. All payload data is end-to-end encrypted (XChaCha20-Poly1305) and the relay server **cannot** read any of it.
 
@@ -56,8 +56,8 @@ See [`.env.example`](.env.example) for a template.
 ### Docker
 
 ```bash
-docker build -t remote-relay .
-docker run -d -p 8080:8080 remote-relay
+docker build -t sesori-relay .
+docker run -d -p 8080:8080 sesori-relay
 ```
 
 The image is a multi-stage build (~15MB) running as a non-root user.
@@ -107,7 +107,7 @@ Binary frames from phone → relay → bridge are prefixed with a 2-byte big-end
 ### Encryption protocol
 
 - **Key exchange**: X25519 (Diffie-Hellman)
-- **Key derivation**: HKDF-SHA256 with info `"opencode-relay-v1"`
+- **Key derivation**: HKDF-SHA256 with info `"sesori-relay-v1"`
 - **Symmetric encryption**: XChaCha20-Poly1305 (24-byte nonce)
 - **Message framing**: `[0x01 version byte][24-byte nonce][ciphertext + 16-byte auth tag]`
 

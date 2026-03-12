@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/anthropics/remote-relay/internal/auth"
+	"github.com/sesori-ai/sesori_relay_server/internal/auth"
 )
 
 // Server is the relay WebSocket server. It manages rooms, rate limiting, and

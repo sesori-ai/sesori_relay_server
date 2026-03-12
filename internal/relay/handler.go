@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/anthropics/remote-relay/internal/auth"
-	"github.com/anthropics/remote-relay/internal/protocol"
 	"github.com/coder/websocket"
+	"github.com/sesori-ai/sesori_relay_server/internal/auth"
+	"github.com/sesori-ai/sesori_relay_server/internal/protocol"
 )
 
 const (
