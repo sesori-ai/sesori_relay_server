@@ -2,15 +2,16 @@
 
 WebSocket relay server for proxying encrypted traffic between the [OpenCode Bridge CLI](https://github.com/anthropics/opencode-bridge) running on a laptop and the OpenCode mobile app running on a phone.
 
-The relay is a dumb pipe — it forwards opaque binary blobs between two peers in a room. All payload data is end-to-end encrypted (XChaCha20-Poly1305) and the relay server **cannot** read any of it.
+The relay routes traffic by account — connections are grouped by the `userId` extracted from a JWT token, so a bridge and up to 5 phones belonging to the same account can exchange data without the relay reading any of it. All payload data is end-to-end encrypted (XChaCha20-Poly1305) and the relay server **cannot** read any of it.
 
 ## How it works
 
-1. Bridge CLI connects to the relay and creates a room (8-char hex code, e.g. `a1b2-c3d4`)
-2. Phone scans a QR code containing the room code and the bridge's public key
-3. Phone joins the same room via WebSocket
-4. Relay forwards all messages between the two peers — encrypted, opaque, no inspection
-5. Room is destroyed when either peer disconnects
+1. Bridge CLI connects to `/ws` and sends an auth message with a signed JWT and role `"bridge"`
+2. Phone connects to `/ws` and sends an auth message with a signed JWT and role `"phone"`
+3. Relay extracts `userId` from each JWT and groups connections by account — 1 bridge + up to 5 phones per account
+4. Binary frames from phone → relay → bridge carry a 2-byte `connId` prefix so the bridge can address replies back to the correct phone
+5. Control messages notify each side when the other connects or disconnects (`bridge_connected`, `bridge_disconnected`, `phone_connected`, `phone_disconnected`)
+6. Group is torn down when all connections close — no state is persisted
 
 ## Architecture
 
@@ -18,8 +19,8 @@ The relay is a dumb pipe — it forwards opaque binary blobs between two peers i
 Phone ←──(encrypted)──→ Relay Server ←──(encrypted)──→ Bridge CLI → opencode serve
 ```
 
-- **Rooms**: Each room holds exactly 2 peers (bridge + phone). Single-use, 5-minute expiry if second peer never joins.
-- **Rate limiting**: Max 10 connections per IP, max 10,000 rooms globally.
+- **Account groups**: Connections are grouped by `userId` from the JWT. Each group holds 1 bridge + up to 5 phones.
+- **Rate limiting**: Max 10 connections per IP, max 10,000 active groups globally.
 - **No storage**: The relay holds no state beyond active WebSocket connections. Nothing is persisted.
 
 ## Running locally
@@ -47,8 +48,8 @@ See [`.env.example`](.env.example) for a template.
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Health check — returns `{"status":"ok","rooms":N,"connections":N}` |
-| `GET /ws/{roomCode}` | WebSocket endpoint — join or create a room |
+| `GET /health` | Health check — returns `{"status":"ok","groups":N,"connections":N}` |
+| `GET /ws` | WebSocket endpoint — authenticated via JWT, routed by userId |
 
 ## Deployment
 
@@ -67,21 +68,43 @@ See [`DEPLOY.md`](DEPLOY.md) for Fly.io and VPS (Docker + Caddy) deployment guid
 
 ### CI
 
-The GitHub Actions workflow (`.github/workflows/docker.yml`) runs on every push and PR:
-- Builds the Docker image
-- Starts a container and verifies the health endpoint
-- Runs `go vet` and builds the binary
+The GitHub Actions workflows run on every push and PR:
+- `.github/workflows/docker.yml` — builds the Docker image, starts a container, and verifies the health endpoint
+- `.github/workflows/test.yml` — runs `go vet` and `go test ./...`
 
 ## Security
 
 - The relay **cannot decrypt** any traffic. All data between phone and bridge is encrypted with XChaCha20-Poly1305 using keys derived from an X25519 key exchange that happens directly between the two peers.
-- Rooms are single-use and expire after 5 minutes if the second peer never connects.
+- JWT authentication is required before any data is forwarded. Tokens must be RS256-signed with valid `userId`, `tokenType`, `aud`, `iss`, and `exp` claims.
+- Rate limiting prevents abuse: max connections per IP, max groups globally, and at most 5 phones per account group.
 - The server runs as a non-root user in Docker.
-- Rate limiting prevents abuse (10 connections per IP).
 
 ## Protocol
 
-The relay doesn't define the message format — it forwards raw WebSocket frames. The [encryption protocol](https://github.com/anthropics/opencode-bridge) is defined by the bridge and mobile app:
+### Auth handshake
+
+Every client sends this as the first WebSocket message (plaintext JSON):
+
+```json
+{ "type": "auth", "token": "<JWT>", "role": "bridge" }
+```
+
+Roles: `"bridge"` or `"phone"`. The relay closes the connection if auth fails.
+
+### Control messages (JSON text frames)
+
+| Message | Direction | Description |
+|---------|-----------|-------------|
+| `phone_connected` | relay → bridge | A phone joined; includes `connId` (uint16) |
+| `phone_disconnected` | relay → bridge | A phone left; includes `connId` |
+| `bridge_connected` | relay → phone | The bridge is online |
+| `bridge_disconnected` | relay → phone | The bridge disconnected |
+
+### Data frames (binary)
+
+Binary frames from phone → relay → bridge are prefixed with a 2-byte big-endian `connId`. The bridge uses this to address responses back to the correct phone. `connId == 0` is a broadcast from bridge to all connected phones.
+
+### Encryption protocol
 
 - **Key exchange**: X25519 (Diffie-Hellman)
 - **Key derivation**: HKDF-SHA256 with info `"opencode-relay-v1"`

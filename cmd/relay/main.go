@@ -40,7 +40,7 @@ func main() {
 
 	slog.Info("starting relay server", "addr", *addr, "log-level", *logLevel)
 
-	var authenticator auth.Authenticator
+	var authenticator *auth.JWTAuthenticator
 	if *authBackendURL != "" {
 		keyStore := auth.NewKeyStore(*authBackendURL + "/auth/public-key")
 		if err := keyStore.Load(); err != nil {

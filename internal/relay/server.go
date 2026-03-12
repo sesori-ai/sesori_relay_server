@@ -12,30 +12,30 @@ import (
 // Server is the relay WebSocket server. It manages rooms, rate limiting, and
 // delegates authentication to the provided Authenticator (nil = auth disabled).
 type Server struct {
-	addr          string
-	manager       *RoomManager
-	rateLimiter   *RateLimiter
-	httpServer    *http.Server
-	authenticator auth.Authenticator
+	addr        string
+	manager     *GroupManager
+	rateLimiter *RateLimiter
+	httpServer  *http.Server
+	jwtAuth     *auth.JWTAuthenticator
 }
 
 // NewServer creates a relay server. Pass a nil authenticator to disable auth.
-func NewServer(addr string, authenticator auth.Authenticator) *Server {
+func NewServer(addr string, jwtAuth *auth.JWTAuthenticator) *Server {
 	return &Server{
-		addr:          addr,
-		manager:       NewRoomManager(),
-		rateLimiter:   NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
-		authenticator: authenticator,
+		addr:        addr,
+		manager:     NewGroupManager(),
+		rateLimiter: NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
+		jwtAuth:     jwtAuth,
 	}
 }
 
-func (s *Server) Manager() *RoomManager {
+func (s *Server) Manager() *GroupManager {
 	return s.manager
 }
 
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /ws/{roomCode}", s.handleWebSocket)
+	mux.HandleFunc("GET /ws", s.handleWebSocket)
 	mux.HandleFunc("GET /status", handleStatus)
 	mux.HandleFunc("GET /health", s.handleHealth)
 
@@ -43,8 +43,6 @@ func (s *Server) Start(ctx context.Context) error {
 		Addr:    s.addr,
 		Handler: mux,
 	}
-
-	s.manager.StartCleanup(ctx)
 
 	go func() {
 		<-ctx.Done()
@@ -71,8 +69,7 @@ func handleStatus(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":      "ok",
-		"rooms":       s.manager.RoomCount(),
-		"connections": s.manager.ConnectionCount(),
+		"status": "ok",
+		"groups": s.manager.Count(),
 	})
 }
