@@ -5,6 +5,28 @@ import (
 	"fmt"
 )
 
+// Message type constants for the wire protocol.
+const (
+	TypeAuth           = "auth"
+	TypeKeyExchange    = "key_exchange"
+	TypeReady          = "ready"
+	TypeRequest        = "request"
+	TypeResponse       = "response"
+	TypeSSESubscribe   = "sse_subscribe"
+	TypeSSEUnsubscribe = "sse_unsubscribe"
+	TypeSSEEvent       = "sse_event"
+
+	// Control messages sent by relay
+	TypePhoneConnected     = "phone_connected"
+	TypePhoneDisconnected  = "phone_disconnected"
+	TypeBridgeConnected    = "bridge_connected"
+	TypeBridgeDisconnected = "bridge_disconnected"
+
+	// Connection roles
+	RoleBridge = "bridge"
+	RolePhone  = "phone"
+)
+
 // Envelope wraps all messages with a type discriminator
 type Envelope struct {
 	Type string `json:"type"`
@@ -94,56 +116,56 @@ func ParseMessage(data []byte) (interface{}, error) {
 	}
 
 	switch envelope.Type {
-	case "auth":
+	case TypeAuth:
 		var msg RoleAuthMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal auth message: %w", err)
 		}
 		return msg, nil
 
-	case "key_exchange":
+	case TypeKeyExchange:
 		var msg KeyExchangeMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal key_exchange message: %w", err)
 		}
 		return msg, nil
 
-	case "ready":
+	case TypeReady:
 		var msg ReadyMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal ready message: %w", err)
 		}
 		return msg, nil
 
-	case "request":
+	case TypeRequest:
 		var msg RequestMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal request message: %w", err)
 		}
 		return msg, nil
 
-	case "response":
+	case TypeResponse:
 		var msg ResponseMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal response message: %w", err)
 		}
 		return msg, nil
 
-	case "sse_subscribe":
+	case TypeSSESubscribe:
 		var msg SSESubscribeMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal sse_subscribe message: %w", err)
 		}
 		return msg, nil
 
-	case "sse_unsubscribe":
+	case TypeSSEUnsubscribe:
 		var msg SSEUnsubscribeMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal sse_unsubscribe message: %w", err)
 		}
 		return msg, nil
 
-	case "sse_event":
+	case TypeSSEEvent:
 		var msg SSEEventMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal sse_event message: %w", err)

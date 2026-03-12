@@ -11,6 +11,14 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+const (
+	tokenTypeAccess = "access"
+	tokenTypeBridge = "bridge"
+	audienceMobile  = "mobile"
+	audienceBridge  = "bridge"
+	issuerBackend   = "auth-backend"
+)
+
 // JWTAuthenticator validates WebSocket connections by reading an auth message
 // containing a signed RS256 JWT. It verifies the signature against the key
 // store, validates required claims, and returns the authenticated identity.
@@ -122,7 +130,7 @@ func validateClaims(token *jwt.Token) (AuthResult, string, error) {
 	if err != nil {
 		return AuthResult{}, "", err
 	}
-	if tokenType != "access" && tokenType != "bridge" {
+	if tokenType != tokenTypeAccess && tokenType != tokenTypeBridge {
 		return AuthResult{}, "", fmt.Errorf("invalid tokenType claim: %s", tokenType)
 	}
 
@@ -130,7 +138,7 @@ func validateClaims(token *jwt.Token) (AuthResult, string, error) {
 	if err != nil {
 		return AuthResult{}, "", err
 	}
-	if aud != "mobile" && aud != "bridge" {
+	if aud != audienceMobile && aud != audienceBridge {
 		return AuthResult{}, "", fmt.Errorf("invalid aud claim: %s", aud)
 	}
 
@@ -138,7 +146,7 @@ func validateClaims(token *jwt.Token) (AuthResult, string, error) {
 	if err != nil {
 		return AuthResult{}, "", err
 	}
-	if iss != "auth-backend" {
+	if iss != issuerBackend {
 		return AuthResult{}, "", fmt.Errorf("invalid iss claim: %s", iss)
 	}
 
