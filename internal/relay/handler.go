@@ -111,7 +111,10 @@ func startPingLoop(ctx context.Context, cancel context.CancelFunc, conn *websock
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := conn.Ping(ctx); err != nil {
+				pingCtx, cancelPing := context.WithTimeout(ctx, pingInterval/2)
+				err := conn.Ping(pingCtx)
+				cancelPing()
+				if err != nil {
 					cancel()
 					return
 				}
