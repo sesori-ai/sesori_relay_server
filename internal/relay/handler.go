@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	maxMessageSize      = 32 * 1024 * 1024 // 32 MiB — session data can be large
+	maxMessageSize      = 64 * 1024 * 1024 // 64 MiB — session data can be large
 	maxPhonesPerAccount = 5
 	pingInterval        = 30 * time.Second
 )
