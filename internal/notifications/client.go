@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+const (
+	BridgeStatusConnected    = "connected"
+	BridgeStatusDisconnected = "disconnected"
+)
+
 type BridgeStatusPayload struct {
 	UserID    string `json:"userId"`
 	Status    string `json:"status"`

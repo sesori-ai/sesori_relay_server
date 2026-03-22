@@ -35,8 +35,8 @@ func TestClient_NotifyBridgeStatus_Success(t *testing.T) {
 		if payload.UserID != "user-123" {
 			t.Fatalf("expected userId user-123, got %q", payload.UserID)
 		}
-		if payload.Status != "connected" {
-			t.Fatalf("expected status connected, got %q", payload.Status)
+		if payload.Status != BridgeStatusConnected {
+			t.Fatalf("expected status %s, got %q", BridgeStatusConnected, payload.Status)
 		}
 		if _, err := time.Parse(time.RFC3339, payload.Timestamp); err != nil {
 			t.Fatalf("timestamp not RFC3339: %v", err)
@@ -47,7 +47,7 @@ func TestClient_NotifyBridgeStatus_Success(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL, secret)
-	err := client.NotifyBridgeStatus(context.Background(), "user-123", "connected")
+	err := client.NotifyBridgeStatus(context.Background(), "user-123", BridgeStatusConnected)
 	if err != nil {
 		t.Fatalf("NotifyBridgeStatus returned error: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestClient_NotifyBridgeStatus_Unauthorized(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "secret")
-	err := client.NotifyBridgeStatus(context.Background(), "user-123", "connected")
+	err := client.NotifyBridgeStatus(context.Background(), "user-123", BridgeStatusConnected)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -76,7 +76,7 @@ func TestClient_NotifyBridgeStatus_ServerError(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "secret")
-	err := client.NotifyBridgeStatus(context.Background(), "user-123", "disconnected")
+	err := client.NotifyBridgeStatus(context.Background(), "user-123", BridgeStatusDisconnected)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -93,7 +93,7 @@ func TestClient_NotifyBridgeStatus_ServerUnreachable(t *testing.T) {
 	ts.Close()
 
 	client := NewClient(url, "secret")
-	err := client.NotifyBridgeStatus(context.Background(), "user-123", "connected")
+	err := client.NotifyBridgeStatus(context.Background(), "user-123", BridgeStatusConnected)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

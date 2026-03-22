@@ -146,7 +146,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 
 	if notificationsClient != nil {
 		go func() {
-			if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, "connected"); err != nil {
+			if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, notifications.BridgeStatusConnected); err != nil {
 				slog.Warn("failed to notify bridge connected", "error", err, "userId", userID)
 			}
 		}()
@@ -167,7 +167,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 
 		if notificationsClient != nil {
 			go func() {
-				if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, "disconnected"); err != nil {
+				if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, notifications.BridgeStatusDisconnected); err != nil {
 					slog.Warn("failed to notify bridge disconnected", "error", err, "userId", userID)
 				}
 			}()
