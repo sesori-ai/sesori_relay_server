@@ -52,7 +52,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	jwtAuth := auth.NewJWTAuthenticator(ks)
-	relayServer := NewServer(":0", jwtAuth)
+	relayServer := NewServer(":0", jwtAuth, nil)
 
 	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		relayServer.handleWebSocket(w, r)
