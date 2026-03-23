@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/sesori-ai/sesori_relay_server/internal/auth"
+	"github.com/sesori-ai/sesori_relay_server/internal/notifications"
 	"github.com/sesori-ai/sesori_relay_server/internal/protocol"
 )
 
@@ -66,7 +67,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("connection joined group", "userID", userID, "role", authMsg.Role)
 	if authMsg.Role == protocol.RoleBridge {
-		handleBridge(r.Context(), conn, group, s.manager, userID)
+		handleBridge(r.Context(), conn, group, s.manager, userID, s.notifications)
 		return
 	}
 	handlePhone(r.Context(), conn, group, s.manager, userID)
@@ -123,7 +124,7 @@ func startPingLoop(ctx context.Context, cancel context.CancelFunc, conn *websock
 	}()
 }
 
-func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup, manager *GroupManager, userID string) {
+func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup, manager *GroupManager, userID string, notificationsClient *notifications.Client) {
 	group.mu.Lock()
 	oldBridge := group.Bridge
 	connCtx, connCancel := context.WithCancel(ctx)
@@ -143,6 +144,14 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeConnectedJSON)
 	}
 
+	if notificationsClient != nil {
+		go func() {
+			if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, notifications.BridgeStatusConnected); err != nil {
+				slog.Warn("failed to notify bridge connected", "error", err, "userId", userID)
+			}
+		}()
+	}
+
 	defer func() {
 		connCancel()
 		group.mu.Lock()
@@ -155,6 +164,15 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		for _, phone := range phones {
 			_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeDisconnectedJSON)
 		}
+
+		if notificationsClient != nil {
+			go func() {
+				if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, notifications.BridgeStatusDisconnected); err != nil {
+					slog.Warn("failed to notify bridge disconnected", "error", err, "userId", userID)
+				}
+			}()
+		}
+
 		manager.RemoveGroupIfEmpty(userID)
 	}()
 

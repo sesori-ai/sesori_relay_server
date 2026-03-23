@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sesori-ai/sesori_relay_server/internal/auth"
+	"github.com/sesori-ai/sesori_relay_server/internal/notifications"
 	"github.com/sesori-ai/sesori_relay_server/internal/relay"
 )
 
@@ -19,11 +20,15 @@ func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	logLevel := flag.String("log-level", "info", "log level (debug, info, warn, error)")
 	authBackendURL := flag.String("auth-backend-url", "", "auth backend base URL (e.g. https://auth.example.com); auth is disabled when empty")
+	relayWebhookSecret := flag.String("relay-webhook-secret", "", "shared secret for auth server webhook")
 	flag.Parse()
 
 	// Also honour the AUTH_BACKEND_URL environment variable (flag takes precedence).
 	if *authBackendURL == "" {
 		*authBackendURL = os.Getenv("AUTH_BACKEND_URL")
+	}
+	if *relayWebhookSecret == "" {
+		*relayWebhookSecret = os.Getenv("RELAY_WEBHOOK_SECRET")
 	}
 
 	level := parseLogLevel(*logLevel)
@@ -51,7 +56,15 @@ func main() {
 		authenticator = auth.NewJWTAuthenticator(keyStore)
 	}
 
-	server := relay.NewServer(*addr, authenticator)
+	var notifs *notifications.Client
+	if *relayWebhookSecret != "" && *authBackendURL != "" {
+		notifs = notifications.NewClient(*authBackendURL, *relayWebhookSecret)
+		slog.Info("push notifications enabled")
+	} else {
+		slog.Info("push notifications disabled (no webhook secret)")
+	}
+
+	server := relay.NewServer(*addr, authenticator, notifs)
 
 	if err := server.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server error", "err", err)

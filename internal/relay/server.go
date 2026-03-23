@@ -7,25 +7,28 @@ import (
 	"time"
 
 	"github.com/sesori-ai/sesori_relay_server/internal/auth"
+	"github.com/sesori-ai/sesori_relay_server/internal/notifications"
 )
 
 // Server is the relay WebSocket server. It manages rooms, rate limiting, and
 // delegates authentication to the provided Authenticator (nil = auth disabled).
 type Server struct {
-	addr        string
-	manager     *GroupManager
-	rateLimiter *RateLimiter
-	httpServer  *http.Server
-	jwtAuth     *auth.JWTAuthenticator
+	addr          string
+	manager       *GroupManager
+	rateLimiter   *RateLimiter
+	httpServer    *http.Server
+	jwtAuth       *auth.JWTAuthenticator
+	notifications *notifications.Client
 }
 
 // NewServer creates a relay server. Pass a nil authenticator to disable auth.
-func NewServer(addr string, jwtAuth *auth.JWTAuthenticator) *Server {
+func NewServer(addr string, jwtAuth *auth.JWTAuthenticator, notifs *notifications.Client) *Server {
 	return &Server{
-		addr:        addr,
-		manager:     NewGroupManager(),
-		rateLimiter: NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
-		jwtAuth:     jwtAuth,
+		addr:          addr,
+		manager:       NewGroupManager(),
+		rateLimiter:   NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
+		jwtAuth:       jwtAuth,
+		notifications: notifs,
 	}
 }
 
