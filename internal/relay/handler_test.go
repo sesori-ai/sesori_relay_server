@@ -564,11 +564,17 @@ func TestHandler_BridgeID_StoredOnConnection(t *testing.T) {
 	defer bridge.CloseNow()
 
 	g := env.relay.manager.GetOrCreateGroup("user1")
-	if g.Bridge == nil {
+	g.mu.Lock()
+	bridgeID := ""
+	if g.Bridge != nil {
+		bridgeID = g.Bridge.BridgeID
+	}
+	g.mu.Unlock()
+	if bridgeID == "" {
 		t.Fatal("expected bridge to be set on group")
 	}
-	if g.Bridge.BridgeID != "br_abc12345" {
-		t.Errorf("expected bridgeId br_abc12345 on connection, got %q", g.Bridge.BridgeID)
+	if bridgeID != "br_abc12345" {
+		t.Errorf("expected bridgeId br_abc12345 on connection, got %q", bridgeID)
 	}
 }
 
