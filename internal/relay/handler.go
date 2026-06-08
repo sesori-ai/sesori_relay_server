@@ -72,11 +72,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if authMsg.Role == protocol.RoleBridge {
 		if authMsg.BridgeID != "" && !bridgeIDRegexp.MatchString(authMsg.BridgeID) {
 			s.manager.RemoveGroupIfEmpty(userID)
+			slog.Warn("bridge connection rejected: invalid bridgeId format", "userId", userID, "bridgeId", authMsg.BridgeID)
 			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid bridgeId format")
 			return
 		}
 		if s.requireBridgeID && authMsg.BridgeID == "" {
 			s.manager.RemoveGroupIfEmpty(userID)
+			slog.Warn("bridge connection rejected: bridgeId required", "userId", userID)
 			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridgeId required")
 			return
 		}
@@ -163,7 +165,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 	if notificationsClient != nil {
 		go func() {
 			if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, bridgeID, notifications.BridgeStatusConnected); err != nil {
-				slog.Warn("failed to notify bridge connected", "error", err, "userId", userID)
+				slog.Warn("failed to notify bridge connected", "error", err, "userId", userID, "bridgeId", bridgeID)
 			}
 		}()
 	}
@@ -171,22 +173,25 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 	defer func() {
 		connCancel()
 		group.mu.Lock()
-		if group.Bridge == newConn {
+		isCurrent := group.Bridge == newConn
+		if isCurrent {
 			group.Bridge = nil
 		}
 		group.mu.Unlock()
 
-		phones := group.AllPhones()
-		for _, phone := range phones {
-			_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeDisconnectedJSON)
-		}
+		if isCurrent {
+			phones := group.AllPhones()
+			for _, phone := range phones {
+				_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeDisconnectedJSON)
+			}
 
-		if notificationsClient != nil {
-			go func() {
-				if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, bridgeID, notifications.BridgeStatusDisconnected); err != nil {
-					slog.Warn("failed to notify bridge disconnected", "error", err, "userId", userID)
-				}
-			}()
+			if notificationsClient != nil {
+				go func() {
+					if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, bridgeID, notifications.BridgeStatusDisconnected); err != nil {
+						slog.Warn("failed to notify bridge disconnected", "error", err, "userId", userID, "bridgeId", bridgeID)
+					}
+				}()
+			}
 		}
 
 		manager.RemoveGroupIfEmpty(userID)

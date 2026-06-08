@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -31,8 +33,15 @@ func main() {
 	if *relayWebhookSecret == "" {
 		*relayWebhookSecret = os.Getenv("RELAY_WEBHOOK_SECRET")
 	}
-	if v := os.Getenv("RELAY_REQUIRE_BRIDGE_ID"); v != "" {
-		*requireBridgeID = v == "true" || v == "1"
+	if !flagWasSet("require-bridge-id") {
+		v, ok, err := envBool("RELAY_REQUIRE_BRIDGE_ID")
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "invalid RELAY_REQUIRE_BRIDGE_ID: %v\n", err)
+			os.Exit(1)
+		}
+		if ok {
+			*requireBridgeID = v
+		}
 	}
 
 	level := parseLogLevel(*logLevel)
@@ -76,6 +85,29 @@ func main() {
 	}
 
 	slog.Info("relay server stopped")
+}
+
+func flagWasSet(name string) bool {
+	seen := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			seen = true
+		}
+	})
+	return seen
+}
+
+func envBool(name string) (bool, bool, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return false, false, nil
+	}
+
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, true, err
+	}
+	return value, true, nil
 }
 
 func parseLogLevel(s string) slog.Level {
