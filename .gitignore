@@ -6,3 +6,4 @@ bin/
 vendor/
 *.gitkeep
 .env
+.sisyphus/

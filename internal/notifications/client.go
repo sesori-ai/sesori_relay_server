@@ -16,6 +16,7 @@ const (
 
 type BridgeStatusPayload struct {
 	UserID    string `json:"userId"`
+	BridgeID  string `json:"bridgeId,omitempty"`
 	Status    string `json:"status"`
 	Timestamp string `json:"timestamp"`
 }
@@ -36,9 +37,10 @@ func NewClient(baseURL string, secret string) *Client {
 	}
 }
 
-func (c *Client) NotifyBridgeStatus(ctx context.Context, userID string, status string) error {
+func (c *Client) NotifyBridgeStatus(ctx context.Context, userID, bridgeID, status string) error {
 	payload := BridgeStatusPayload{
 		UserID:    userID,
+		BridgeID:  bridgeID,
 		Status:    status,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}

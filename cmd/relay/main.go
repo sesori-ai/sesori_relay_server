@@ -21,6 +21,7 @@ func main() {
 	logLevel := flag.String("log-level", "info", "log level (debug, info, warn, error)")
 	authBackendURL := flag.String("auth-backend-url", "", "auth backend base URL (e.g. https://auth.example.com); auth is disabled when empty")
 	relayWebhookSecret := flag.String("relay-webhook-secret", "", "shared secret for auth server webhook")
+	requireBridgeID := flag.Bool("require-bridge-id", false, "require bridgeId field on bridge auth messages (transition gate; set true once the bridge fleet has rolled over)")
 	flag.Parse()
 
 	// Also honour the AUTH_BACKEND_URL environment variable (flag takes precedence).
@@ -29,6 +30,9 @@ func main() {
 	}
 	if *relayWebhookSecret == "" {
 		*relayWebhookSecret = os.Getenv("RELAY_WEBHOOK_SECRET")
+	}
+	if v := os.Getenv("RELAY_REQUIRE_BRIDGE_ID"); v != "" {
+		*requireBridgeID = v == "true" || v == "1"
 	}
 
 	level := parseLogLevel(*logLevel)
@@ -43,7 +47,7 @@ func main() {
 		slog.Info("auth disabled (no --auth-backend-url provided)")
 	}
 
-	slog.Info("starting relay server", "addr", *addr, "log-level", *logLevel)
+	slog.Info("starting relay server", "addr", *addr, "log-level", *logLevel, "require-bridge-id", *requireBridgeID)
 
 	var authenticator *auth.JWTAuthenticator
 	if *authBackendURL != "" {
@@ -64,7 +68,7 @@ func main() {
 		slog.Info("push notifications disabled (no webhook secret)")
 	}
 
-	server := relay.NewServer(*addr, authenticator, notifs)
+	server := relay.NewServer(*addr, authenticator, notifs, *requireBridgeID)
 
 	if err := server.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server error", "err", err)

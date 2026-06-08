@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/coder/websocket"
@@ -20,6 +21,8 @@ const (
 	maxPhonesPerAccount = 5
 	pingInterval        = 30 * time.Second
 )
+
+var bridgeIDRegexp = regexp.MustCompile(`^br_[A-Za-z0-9_-]{8,32}$`)
 
 var (
 	bridgeConnectedJSON, _    = json.Marshal(protocol.BridgeConnectedMessage{Type: protocol.TypeBridgeConnected})
@@ -67,7 +70,20 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	slog.Debug("connection joined group", "userID", userID, "role", authMsg.Role)
 	if authMsg.Role == protocol.RoleBridge {
-		handleBridge(r.Context(), conn, group, s.manager, userID, s.notifications)
+		if authMsg.BridgeID != "" && !bridgeIDRegexp.MatchString(authMsg.BridgeID) {
+			s.manager.RemoveGroupIfEmpty(userID)
+			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid bridgeId format")
+			return
+		}
+		if s.requireBridgeID && authMsg.BridgeID == "" {
+			s.manager.RemoveGroupIfEmpty(userID)
+			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridgeId required")
+			return
+		}
+		if !s.requireBridgeID && authMsg.BridgeID == "" {
+			slog.Warn("legacy bridge without bridgeId; set RELAY_REQUIRE_BRIDGE_ID=true to enforce", "userId", userID)
+		}
+		handleBridge(r.Context(), conn, group, s.manager, userID, authMsg.BridgeID, s.notifications)
 		return
 	}
 	handlePhone(r.Context(), conn, group, s.manager, userID)
@@ -124,11 +140,11 @@ func startPingLoop(ctx context.Context, cancel context.CancelFunc, conn *websock
 	}()
 }
 
-func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup, manager *GroupManager, userID string, notificationsClient *notifications.Client) {
+func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup, manager *GroupManager, userID, bridgeID string, notificationsClient *notifications.Client) {
 	group.mu.Lock()
 	oldBridge := group.Bridge
 	connCtx, connCancel := context.WithCancel(ctx)
-	newConn := &Connection{Conn: conn, ConnID: 0, Cancel: connCancel}
+	newConn := &Connection{Conn: conn, ConnID: 0, Cancel: connCancel, BridgeID: bridgeID}
 	group.Bridge = newConn
 	group.mu.Unlock()
 	startPingLoop(connCtx, connCancel, conn)
@@ -146,7 +162,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 
 	if notificationsClient != nil {
 		go func() {
-			if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, notifications.BridgeStatusConnected); err != nil {
+			if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, bridgeID, notifications.BridgeStatusConnected); err != nil {
 				slog.Warn("failed to notify bridge connected", "error", err, "userId", userID)
 			}
 		}()
@@ -167,7 +183,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 
 		if notificationsClient != nil {
 			go func() {
-				if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, notifications.BridgeStatusDisconnected); err != nil {
+				if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, bridgeID, notifications.BridgeStatusDisconnected); err != nil {
 					slog.Warn("failed to notify bridge disconnected", "error", err, "userId", userID)
 				}
 			}()
