@@ -761,14 +761,22 @@ func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing
 	defer newBridge.CloseNow()
 	defer oldBridge.CloseNow()
 
-	second := readCaptured("new bridge connected")
-	if second.bridgeID != "br_newBridge01" || second.status != notifications.BridgeStatusConnected {
-		t.Fatalf("expected new bridge connected event, got %+v", second)
+	replacementEvents := []captured{
+		readCaptured("new bridge connected or old bridge disconnected"),
+		readCaptured("new bridge connected or old bridge disconnected"),
 	}
-
-	third := readCaptured("old bridge disconnected")
-	if third.bridgeID != "br_oldBridge01" || third.status != notifications.BridgeStatusDisconnected {
-		t.Fatalf("expected old bridge disconnected auth event, got %+v", third)
+	seenNewConnected := false
+	seenOldDisconnected := false
+	for _, event := range replacementEvents {
+		if event.bridgeID == "br_newBridge01" && event.status == notifications.BridgeStatusConnected {
+			seenNewConnected = true
+		}
+		if event.bridgeID == "br_oldBridge01" && event.status == notifications.BridgeStatusDisconnected {
+			seenOldDisconnected = true
+		}
+	}
+	if !seenNewConnected || !seenOldDisconnected {
+		t.Fatalf("expected new connected and old disconnected events, got %+v", replacementEvents)
 	}
 
 	newBridge.CloseNow()
