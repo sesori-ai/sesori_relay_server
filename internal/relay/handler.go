@@ -61,10 +61,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authMsg, userID, ok := readAndValidateAuth(r.Context(), conn, s.jwtAuth)
+	authMsg, authResult, ok := readAndValidateAuth(r.Context(), conn, s.jwtAuth)
 	if !ok {
 		return
 	}
+	userID := authResult.UserID
 
 	group := s.manager.GetOrCreateGroup(userID)
 
@@ -82,43 +83,55 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridgeId required")
 			return
 		}
+		if authMsg.BridgeID != "" && !authResult.IsBridgeTokenFor(authMsg.BridgeID) {
+			s.manager.RemoveGroupIfEmpty(userID)
+			slog.Warn("bridge connection rejected: bridge token required", "userId", userID, "bridgeId", authMsg.BridgeID)
+			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridge token required")
+			return
+		}
 		if !s.requireBridgeID && authMsg.BridgeID == "" {
 			slog.Warn("legacy bridge without bridgeId; set RELAY_REQUIRE_BRIDGE_ID=true to enforce", "userId", userID)
 		}
 		handleBridge(r.Context(), conn, group, s.manager, userID, authMsg.BridgeID, s.notifications)
 		return
 	}
+	if !authResult.IsAccessToken() {
+		s.manager.RemoveGroupIfEmpty(userID)
+		slog.Warn("phone connection rejected: access token required", "userId", userID)
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "access token required")
+		return
+	}
 	handlePhone(r.Context(), conn, group, s.manager, userID)
 }
 
-func readAndValidateAuth(ctx context.Context, conn *websocket.Conn, jwtAuth *auth.JWTAuthenticator) (protocol.RoleAuthMessage, string, bool) {
+func readAndValidateAuth(ctx context.Context, conn *websocket.Conn, jwtAuth *auth.JWTAuthenticator) (protocol.RoleAuthMessage, auth.AuthResult, bool) {
 	authCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	msgType, data, err := conn.Read(authCtx)
 	if err != nil || msgType != websocket.MessageText {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthRequired), "auth required")
-		return protocol.RoleAuthMessage{}, "", false
+		return protocol.RoleAuthMessage{}, auth.AuthResult{}, false
 	}
 
 	var authMsg protocol.RoleAuthMessage
 	if err := json.Unmarshal(data, &authMsg); err != nil || authMsg.Type != protocol.TypeAuth {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "auth failed")
-		return protocol.RoleAuthMessage{}, "", false
+		return protocol.RoleAuthMessage{}, auth.AuthResult{}, false
 	}
 
 	if authMsg.Role != protocol.RoleBridge && authMsg.Role != protocol.RolePhone {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid role")
-		return protocol.RoleAuthMessage{}, "", false
+		return protocol.RoleAuthMessage{}, auth.AuthResult{}, false
 	}
 
 	result, err := jwtAuth.Validate(authMsg.Token)
 	if err != nil {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "auth failed")
-		return protocol.RoleAuthMessage{}, "", false
+		return protocol.RoleAuthMessage{}, auth.AuthResult{}, false
 	}
 
-	return authMsg, result.UserID, true
+	return authMsg, result, true
 }
 
 func startPingLoop(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn) {

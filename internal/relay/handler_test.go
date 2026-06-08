@@ -82,10 +82,31 @@ func (e *testEnv) wsURL() string {
 }
 
 func (e *testEnv) makeToken(userID string) string {
+	return e.makeAccessToken(userID)
+}
+
+func (e *testEnv) makeAccessToken(userID string) string {
 	claims := jwt.MapClaims{
 		"userId":    userID,
 		"tokenType": "access",
 		"aud":       "mobile",
+		"iss":       "auth-backend",
+		"exp":       float64(time.Now().Add(time.Hour).Unix()),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	signed, err := token.SignedString(e.privateKey)
+	if err != nil {
+		panic(fmt.Sprintf("SignedString: %v", err))
+	}
+	return signed
+}
+
+func (e *testEnv) makeBridgeToken(userID, bridgeID string) string {
+	claims := jwt.MapClaims{
+		"userId":    userID,
+		"bridgeId":  bridgeID,
+		"tokenType": "bridge",
+		"aud":       "bridge",
 		"iss":       "auth-backend",
 		"exp":       float64(time.Now().Add(time.Hour).Unix()),
 	}
@@ -123,7 +144,11 @@ func (e *testEnv) connectBridgeWithID(t *testing.T, userID, bridgeID string) *we
 	if err != nil {
 		t.Fatalf("dial bridge: %v", err)
 	}
-	if err := sendAuth(ctx, conn, e.makeToken(userID), "bridge", bridgeID); err != nil {
+	token := e.makeAccessToken(userID)
+	if bridgeID != "" {
+		token = e.makeBridgeToken(userID, bridgeID)
+	}
+	if err := sendAuth(ctx, conn, token, "bridge", bridgeID); err != nil {
 		conn.CloseNow()
 		t.Fatalf("sendAuth bridge: %v", err)
 	}
@@ -600,6 +625,38 @@ func TestHandler_BridgeAuth_AcceptsBridgeID_PostTransition(t *testing.T) {
 	}
 }
 
+func TestHandler_BridgeAuth_RejectsAccessTokenWithBridgeID(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial bridge: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := sendAuth(ctx, conn, env.makeAccessToken("user1"), "bridge", "br_abc12345"); err != nil {
+		t.Fatalf("sendAuth bridge: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
+}
+
+func TestHandler_BridgeAuth_RejectsBridgeTokenIDMismatch(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true})
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial bridge: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := sendAuth(ctx, conn, env.makeBridgeToken("user1", "br_tokenBridge01"), "bridge", "br_messageBridge1"); err != nil {
+		t.Fatalf("sendAuth bridge: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
+}
+
 func TestHandler_BridgeAuth_LegacyAllowedInTransition(t *testing.T) {
 	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
 
@@ -646,6 +703,22 @@ func TestHandler_PhoneAuth_IgnoresStrayBridgeID(t *testing.T) {
 	if m["type"] != "bridge_disconnected" {
 		t.Errorf("phone should be accepted; expected bridge_disconnected, got %q", m["type"])
 	}
+}
+
+func TestHandler_PhoneAuth_RejectsBridgeToken(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial phone: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := sendAuth(ctx, conn, env.makeBridgeToken("user1", "br_phoneBridge1"), "phone", ""); err != nil {
+		t.Fatalf("sendAuth phone: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
 }
 
 // --- end-to-end: bridgeId is forwarded in the /internal/bridge-status payload ---
