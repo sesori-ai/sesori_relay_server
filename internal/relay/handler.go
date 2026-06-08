@@ -174,24 +174,29 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		connCancel()
 		group.mu.Lock()
 		isCurrent := group.Bridge == newConn
+		currentBridgeID := ""
+		if group.Bridge != nil {
+			currentBridgeID = group.Bridge.BridgeID
+		}
 		if isCurrent {
 			group.Bridge = nil
 		}
 		group.mu.Unlock()
+		shouldNotifyDisconnected := isCurrent || (bridgeID != "" && bridgeID != currentBridgeID)
 
 		if isCurrent {
 			phones := group.AllPhones()
 			for _, phone := range phones {
 				_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeDisconnectedJSON)
 			}
+		}
 
-			if notificationsClient != nil {
-				go func() {
-					if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, bridgeID, notifications.BridgeStatusDisconnected); err != nil {
-						slog.Warn("failed to notify bridge disconnected", "error", err, "userId", userID, "bridgeId", bridgeID)
-					}
-				}()
-			}
+		if shouldNotifyDisconnected && notificationsClient != nil {
+			go func() {
+				if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, bridgeID, notifications.BridgeStatusDisconnected); err != nil {
+					slog.Warn("failed to notify bridge disconnected", "error", err, "userId", userID, "bridgeId", bridgeID)
+				}
+			}()
 		}
 
 		manager.RemoveGroupIfEmpty(userID)

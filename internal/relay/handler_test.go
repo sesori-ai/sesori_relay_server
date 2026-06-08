@@ -713,7 +713,7 @@ func TestHandler_NotificationsClient_ForwardsBridgeID(t *testing.T) {
 	}
 }
 
-func TestHandler_BridgeReplacement_DoesNotNotifyDisconnectForOldBridge(t *testing.T) {
+func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing.T) {
 	const secret = "test-relay-secret"
 
 	type captured struct {
@@ -722,6 +722,16 @@ func TestHandler_BridgeReplacement_DoesNotNotifyDisconnectForOldBridge(t *testin
 	}
 
 	capturedCh := make(chan captured, 8)
+	readCaptured := func(label string) captured {
+		t.Helper()
+		select {
+		case event := <-capturedCh:
+			return event
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s notification", label)
+			return captured{}
+		}
+	}
 	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("X-Relay-Secret"); got != secret {
 			t.Errorf("expected X-Relay-Secret %q, got %q", secret, got)
@@ -742,7 +752,7 @@ func TestHandler_BridgeReplacement_DoesNotNotifyDisconnectForOldBridge(t *testin
 	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
 	oldBridge := env.connectBridgeWithID(t, "user1", "br_oldBridge01")
 
-	first := <-capturedCh
+	first := readCaptured("old bridge connected")
 	if first.bridgeID != "br_oldBridge01" || first.status != notifications.BridgeStatusConnected {
 		t.Fatalf("expected old bridge connected event, got %+v", first)
 	}
@@ -751,26 +761,19 @@ func TestHandler_BridgeReplacement_DoesNotNotifyDisconnectForOldBridge(t *testin
 	defer newBridge.CloseNow()
 	defer oldBridge.CloseNow()
 
-	second := <-capturedCh
+	second := readCaptured("new bridge connected")
 	if second.bridgeID != "br_newBridge01" || second.status != notifications.BridgeStatusConnected {
 		t.Fatalf("expected new bridge connected event, got %+v", second)
 	}
 
-	select {
-	case event := <-capturedCh:
-		if event.bridgeID == "br_oldBridge01" && event.status == notifications.BridgeStatusDisconnected {
-			t.Fatalf("old bridge replacement must not emit disconnected event")
-		}
-	case <-time.After(150 * time.Millisecond):
+	third := readCaptured("old bridge disconnected")
+	if third.bridgeID != "br_oldBridge01" || third.status != notifications.BridgeStatusDisconnected {
+		t.Fatalf("expected old bridge disconnected auth event, got %+v", third)
 	}
 
 	newBridge.CloseNow()
-	select {
-	case event := <-capturedCh:
-		if event.bridgeID != "br_newBridge01" || event.status != notifications.BridgeStatusDisconnected {
-			t.Fatalf("expected new bridge disconnected event, got %+v", event)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for new bridge disconnected notification")
+	fourth := readCaptured("new bridge disconnected")
+	if fourth.bridgeID != "br_newBridge01" || fourth.status != notifications.BridgeStatusDisconnected {
+		t.Fatalf("expected new bridge disconnected event, got %+v", fourth)
 	}
 }
