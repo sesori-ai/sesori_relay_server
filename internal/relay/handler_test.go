@@ -29,7 +29,8 @@ type testEnv struct {
 }
 
 type testEnvOpts struct {
-	requireBridgeID bool
+	requireBridgeID     bool
+	notificationsClient *notifications.Client
 }
 
 func newTestEnv(t *testing.T, opts ...testEnvOpts) *testEnv {
@@ -62,7 +63,7 @@ func newTestEnv(t *testing.T, opts ...testEnvOpts) *testEnv {
 	}
 
 	jwtAuth := auth.NewJWTAuthenticator(ks)
-	relayServer := NewServer(":0", jwtAuth, nil, o.requireBridgeID)
+	relayServer := NewServer(":0", jwtAuth, o.notificationsClient, o.requireBridgeID)
 
 	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		relayServer.handleWebSocket(w, r)
@@ -653,21 +654,6 @@ func TestHandler_NotificationsClient_ForwardsBridgeID(t *testing.T) {
 		status   string
 	}
 
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("rsa.GenerateKey: %v", err)
-	}
-	pubDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
-	if err != nil {
-		t.Fatalf("MarshalPKIXPublicKey: %v", err)
-	}
-	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
-
-	keyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(pubPEM)
-	}))
-	t.Cleanup(keyServer.Close)
-
 	capturedCh := make(chan captured, 4)
 	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("X-Relay-Secret"); got != secret {
@@ -689,43 +675,10 @@ func TestHandler_NotificationsClient_ForwardsBridgeID(t *testing.T) {
 	}))
 	t.Cleanup(notifServer.Close)
 
-	ks := auth.NewKeyStore(keyServer.URL)
-	if err := ks.Load(); err != nil {
-		t.Fatalf("KeyStore.Load: %v", err)
-	}
-	jwtAuth := auth.NewJWTAuthenticator(ks)
 	notif := notifications.NewClient(notifServer.URL, secret)
-	relayServer := NewServer(":0", jwtAuth, notif, true)
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
 
-	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		relayServer.handleWebSocket(w, r)
-	}))
-	t.Cleanup(httpSrv.Close)
-
-	wsURL := "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/"
-
-	claims := jwt.MapClaims{
-		"userId":    "user1",
-		"tokenType": "access",
-		"aud":       "mobile",
-		"iss":       "auth-backend",
-		"exp":       float64(time.Now().Add(time.Hour).Unix()),
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-	signed, err := token.SignedString(privateKey)
-	if err != nil {
-		t.Fatalf("SignedString: %v", err)
-	}
-
-	conn, _, err := websocket.Dial(context.Background(), wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-
-	authMsg := fmt.Sprintf(`{"type":"auth","token":"%s","role":"bridge","bridgeId":%q}`, signed, bridgeID)
-	if err := conn.Write(context.Background(), websocket.MessageText, []byte(authMsg)); err != nil {
-		t.Fatalf("write auth: %v", err)
-	}
+	conn := env.connectBridgeWithID(t, "user1", bridgeID)
 
 	select {
 	case c := <-capturedCh:
@@ -757,5 +710,67 @@ func TestHandler_NotificationsClient_ForwardsBridgeID(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for disconnected notification")
+	}
+}
+
+func TestHandler_BridgeReplacement_DoesNotNotifyDisconnectForOldBridge(t *testing.T) {
+	const secret = "test-relay-secret"
+
+	type captured struct {
+		bridgeID string
+		status   string
+	}
+
+	capturedCh := make(chan captured, 8)
+	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Relay-Secret"); got != secret {
+			t.Errorf("expected X-Relay-Secret %q, got %q", secret, got)
+		}
+		var payload struct {
+			BridgeID string `json:"bridgeId"`
+			Status   string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		capturedCh <- captured{bridgeID: payload.BridgeID, status: payload.Status}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(notifServer.Close)
+
+	notif := notifications.NewClient(notifServer.URL, secret)
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+	oldBridge := env.connectBridgeWithID(t, "user1", "br_oldBridge01")
+
+	first := <-capturedCh
+	if first.bridgeID != "br_oldBridge01" || first.status != notifications.BridgeStatusConnected {
+		t.Fatalf("expected old bridge connected event, got %+v", first)
+	}
+
+	newBridge := env.connectBridgeWithID(t, "user1", "br_newBridge01")
+	defer newBridge.CloseNow()
+	defer oldBridge.CloseNow()
+
+	second := <-capturedCh
+	if second.bridgeID != "br_newBridge01" || second.status != notifications.BridgeStatusConnected {
+		t.Fatalf("expected new bridge connected event, got %+v", second)
+	}
+
+	select {
+	case event := <-capturedCh:
+		if event.bridgeID == "br_oldBridge01" && event.status == notifications.BridgeStatusDisconnected {
+			t.Fatalf("old bridge replacement must not emit disconnected event")
+		}
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	newBridge.CloseNow()
+	select {
+	case event := <-capturedCh:
+		if event.bridgeID != "br_newBridge01" || event.status != notifications.BridgeStatusDisconnected {
+			t.Fatalf("expected new bridge disconnected event, got %+v", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for new bridge disconnected notification")
 	}
 }

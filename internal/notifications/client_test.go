@@ -3,6 +3,7 @@ package notifications
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -60,8 +61,16 @@ func TestClient_NotifyBridgeStatus_LegacyNoBridgeID(t *testing.T) {
 	const secret = "test-secret"
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read payload: %v", err)
+		}
+		if strings.Contains(string(body), "bridgeId") {
+			t.Fatalf("expected payload to omit bridgeId key, got %s", string(body))
+		}
+
 		var payload BridgeStatusPayload
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatalf("decode payload: %v", err)
 		}
 		if payload.UserID != "user-123" {
@@ -69,15 +78,6 @@ func TestClient_NotifyBridgeStatus_LegacyNoBridgeID(t *testing.T) {
 		}
 		if payload.BridgeID != "" {
 			t.Fatalf("expected empty bridgeId in legacy path, got %q", payload.BridgeID)
-		}
-
-		// Re-marshal and confirm the field is absent (omitempty should drop it from JSON).
-		body, err := json.Marshal(payload)
-		if err != nil {
-			t.Fatalf("re-marshal: %v", err)
-		}
-		if strings.Contains(string(body), "bridgeId") {
-			t.Fatalf("expected payload to omit bridgeId key, got %s", string(body))
 		}
 
 		w.WriteHeader(http.StatusOK)
