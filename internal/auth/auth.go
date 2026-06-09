@@ -17,11 +17,11 @@ type AuthResult struct {
 }
 
 func (r AuthResult) IsAccessToken() bool {
-	return r.TokenType == "access" && r.Audience == "mobile"
+	return r.TokenType == tokenTypeAccess && r.Audience == audienceMobile
 }
 
 func (r AuthResult) IsBridgeTokenFor(bridgeID string) bool {
-	return r.TokenType == "bridge" && r.Audience == "bridge" && r.BridgeID == bridgeID
+	return r.TokenType == tokenTypeBridge && r.Audience == audienceBridge && r.BridgeID == bridgeID
 }
 
 // Authenticator authenticates a WebSocket connection. Implementations read
