@@ -135,3 +135,57 @@ func TestClient_NotifyBridgeStatus_ServerUnreachable(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 }
+
+func TestClient_ValidateBridgeToken_Success(t *testing.T) {
+	const secret = "test-secret"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/internal/bridge-token/validate" {
+			t.Fatalf("expected /internal/bridge-token/validate, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("X-Relay-Secret"); got != secret {
+			t.Fatalf("expected X-Relay-Secret %q, got %q", secret, got)
+		}
+
+		var payload BridgeTokenValidationPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if payload.UserID != "user-123" {
+			t.Fatalf("expected userId user-123, got %q", payload.UserID)
+		}
+		if payload.BridgeID != "br_abc12345" {
+			t.Fatalf("expected bridgeId br_abc12345, got %q", payload.BridgeID)
+		}
+		if payload.BridgeToken != "bridge-token" {
+			t.Fatalf("expected bridge token, got %q", payload.BridgeToken)
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, secret)
+	if err := client.ValidateBridgeToken(context.Background(), "user-123", "br_abc12345", "bridge-token"); err != nil {
+		t.Fatalf("ValidateBridgeToken returned error: %v", err)
+	}
+}
+
+func TestClient_ValidateBridgeToken_Rejected(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "secret")
+	err := client.ValidateBridgeToken(context.Background(), "user-123", "br_abc12345", "bridge-token")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unexpected status: 404") {
+		t.Fatalf("expected unexpected status: 404 error, got %v", err)
+	}
+}

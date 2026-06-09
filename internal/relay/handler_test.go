@@ -657,6 +657,22 @@ func TestHandler_BridgeAuth_RejectsBridgeTokenIDMismatch(t *testing.T) {
 	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
 }
 
+func TestHandler_BridgeAuth_RejectsBridgeTokenWithoutBridgeID(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial bridge: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := sendAuth(ctx, conn, env.makeBridgeToken("user1", "br_tokenBridge01"), "bridge", ""); err != nil {
+		t.Fatalf("sendAuth bridge: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
+}
+
 func TestHandler_BridgeAuth_LegacyAllowedInTransition(t *testing.T) {
 	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
 
@@ -738,6 +754,10 @@ func TestHandler_NotificationsClient_ForwardsBridgeID(t *testing.T) {
 		if got := r.Header.Get("X-Relay-Secret"); got != secret {
 			t.Errorf("expected X-Relay-Secret %q, got %q", secret, got)
 		}
+		if r.URL.Path == "/internal/bridge-token/validate" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		var payload struct {
 			UserID   string `json:"userId"`
 			BridgeID string `json:"bridgeId"`
@@ -815,6 +835,10 @@ func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing
 		if got := r.Header.Get("X-Relay-Secret"); got != secret {
 			t.Errorf("expected X-Relay-Secret %q, got %q", secret, got)
 		}
+		if r.URL.Path == "/internal/bridge-token/validate" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		var payload struct {
 			BridgeID string `json:"bridgeId"`
 			Status   string `json:"status"`
@@ -863,4 +887,34 @@ func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing
 	if fourth.bridgeID != "br_newBridge01" || fourth.status != notifications.BridgeStatusDisconnected {
 		t.Fatalf("expected new bridge disconnected event, got %+v", fourth)
 	}
+}
+
+func TestHandler_BridgeAuth_RejectsAuthBackendBridgeTokenValidationFailure(t *testing.T) {
+	const secret = "test-relay-secret"
+
+	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Relay-Secret"); got != secret {
+			t.Errorf("expected X-Relay-Secret %q, got %q", secret, got)
+		}
+		if r.URL.Path != "/internal/bridge-token/validate" {
+			t.Errorf("expected only bridge token validation before rejection, got %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(notifServer.Close)
+
+	notif := notifications.NewClient(notifServer.URL, secret)
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial bridge: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := sendAuth(ctx, conn, env.makeBridgeToken("user1", "br_revoked001"), "bridge", "br_revoked001"); err != nil {
+		t.Fatalf("sendAuth bridge: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
 }

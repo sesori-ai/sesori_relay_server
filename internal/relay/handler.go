@@ -89,7 +89,21 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridge token required")
 			return
 		}
+		if authMsg.BridgeID != "" && s.notifications != nil {
+			if err := s.notifications.ValidateBridgeToken(r.Context(), userID, authMsg.BridgeID, authMsg.Token); err != nil {
+				s.manager.RemoveGroupIfEmpty(userID)
+				slog.Warn("bridge connection rejected: bridge token revoked or unknown", "userId", userID, "bridgeId", authMsg.BridgeID, "err", err)
+				_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridge token revoked or unknown")
+				return
+			}
+		}
 		if !s.requireBridgeID && authMsg.BridgeID == "" {
+			if !authResult.IsAccessToken() {
+				s.manager.RemoveGroupIfEmpty(userID)
+				slog.Warn("legacy bridge connection rejected: access token required", "userId", userID)
+				_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "access token required")
+				return
+			}
 			slog.Warn("legacy bridge without bridgeId; set RELAY_REQUIRE_BRIDGE_ID=true to enforce", "userId", userID)
 		}
 		handleBridge(r.Context(), conn, group, s.manager, userID, authMsg.BridgeID, s.notifications)
