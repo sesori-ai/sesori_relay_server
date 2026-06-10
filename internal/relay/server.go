@@ -13,22 +13,27 @@ import (
 // Server is the relay WebSocket server. It manages rooms, rate limiting, and
 // delegates authentication to the provided Authenticator (nil = auth disabled).
 type Server struct {
-	addr          string
-	manager       *GroupManager
-	rateLimiter   *RateLimiter
-	httpServer    *http.Server
-	jwtAuth       *auth.JWTAuthenticator
-	notifications *notifications.Client
+	addr            string
+	manager         *GroupManager
+	rateLimiter     *RateLimiter
+	httpServer      *http.Server
+	jwtAuth         *auth.JWTAuthenticator
+	notifications   *notifications.Client
+	requireBridgeID bool
 }
 
 // NewServer creates a relay server. Pass a nil authenticator to disable auth.
-func NewServer(addr string, jwtAuth *auth.JWTAuthenticator, notifs *notifications.Client) *Server {
+// requireBridgeID enforces that every bridge connection sends a bridgeId in
+// its auth message; when false, bridges without bridgeId are accepted (legacy
+// path) and no bridgeId is forwarded to the auth server.
+func NewServer(addr string, jwtAuth *auth.JWTAuthenticator, notifs *notifications.Client, requireBridgeID bool) *Server {
 	return &Server{
-		addr:          addr,
-		manager:       NewGroupManager(),
-		rateLimiter:   NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
-		jwtAuth:       jwtAuth,
-		notifications: notifs,
+		addr:            addr,
+		manager:         NewGroupManager(),
+		rateLimiter:     NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
+		jwtAuth:         jwtAuth,
+		notifications:   notifs,
+		requireBridgeID: requireBridgeID,
 	}
 }
 

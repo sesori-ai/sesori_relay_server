@@ -13,9 +13,7 @@ import (
 
 const (
 	tokenTypeAccess = "access"
-	tokenTypeBridge = "bridge"
 	audienceMobile  = "mobile"
-	audienceBridge  = "bridge"
 	issuerBackend   = "auth-backend"
 )
 
@@ -62,13 +60,13 @@ func (a *JWTAuthenticator) Authenticate(ctx context.Context, conn *websocket.Con
 		return AuthResult{}, fmt.Errorf("JWT verification failed: %w", err)
 	}
 
-	result, tokenType, err := validateClaims(token)
+	result, err := validateClaims(token)
 	if err != nil {
 		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), err.Error())
 		return AuthResult{}, err
 	}
 
-	slog.Debug("connection authenticated", "userId", result.UserID, "tokenType", tokenType)
+	slog.Debug("connection authenticated", "userId", result.UserID)
 	return result, nil
 }
 
@@ -78,7 +76,7 @@ func (a *JWTAuthenticator) Validate(raw string) (AuthResult, error) {
 		return AuthResult{}, fmt.Errorf("JWT verification failed: %w", err)
 	}
 
-	result, _, err := validateClaims(token)
+	result, err := validateClaims(token)
 	if err != nil {
 		return AuthResult{}, err
 	}
@@ -109,56 +107,56 @@ func (a *JWTAuthenticator) verifyToken(raw string) (*jwt.Token, error) {
 	return token, err
 }
 
-// validateClaims extracts and validates the required JWT claims. Returns the
-// auth result and token type (for logging). Accepted token types are "access"
-// and "bridge"; "refresh" tokens are rejected.
-func validateClaims(token *jwt.Token) (AuthResult, string, error) {
+// validateClaims extracts and validates the required JWT claims. Only user
+// access tokens (tokenType "access", aud "mobile") are accepted; every other
+// token type (refresh, legacy bridge-typed tokens) is rejected.
+func validateClaims(token *jwt.Token) (AuthResult, error) {
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
-		return AuthResult{}, "", fmt.Errorf("invalid JWT claims type")
+		return AuthResult{}, fmt.Errorf("invalid JWT claims type")
 	}
 
 	userId, err := requiredStringClaim(claims, "userId")
 	if err != nil {
-		return AuthResult{}, "", err
+		return AuthResult{}, err
 	}
 	if userId == "" {
-		return AuthResult{}, "", fmt.Errorf("userId claim is empty")
+		return AuthResult{}, fmt.Errorf("userId claim is empty")
 	}
 
 	tokenType, err := requiredStringClaim(claims, "tokenType")
 	if err != nil {
-		return AuthResult{}, "", err
+		return AuthResult{}, err
 	}
-	if tokenType != tokenTypeAccess && tokenType != tokenTypeBridge {
-		return AuthResult{}, "", fmt.Errorf("invalid tokenType claim: %s", tokenType)
+	if tokenType != tokenTypeAccess {
+		return AuthResult{}, fmt.Errorf("invalid tokenType claim: %s", tokenType)
 	}
 
 	aud, err := audienceClaim(claims)
 	if err != nil {
-		return AuthResult{}, "", err
+		return AuthResult{}, err
 	}
-	if aud != audienceMobile && aud != audienceBridge {
-		return AuthResult{}, "", fmt.Errorf("invalid aud claim: %s", aud)
+	if aud != audienceMobile {
+		return AuthResult{}, fmt.Errorf("invalid aud claim: %s", aud)
 	}
 
 	iss, err := requiredStringClaim(claims, "iss")
 	if err != nil {
-		return AuthResult{}, "", err
+		return AuthResult{}, err
 	}
 	if iss != issuerBackend {
-		return AuthResult{}, "", fmt.Errorf("invalid iss claim: %s", iss)
+		return AuthResult{}, fmt.Errorf("invalid iss claim: %s", iss)
 	}
 
 	expFloat, err := requiredFloatClaim(claims, "exp")
 	if err != nil {
-		return AuthResult{}, "", err
+		return AuthResult{}, err
 	}
 
 	return AuthResult{
 		UserID: userId,
 		Expiry: time.Unix(int64(expFloat), 0),
-	}, tokenType, nil
+	}, nil
 }
 
 // requiredStringClaim extracts a required string claim from the map.

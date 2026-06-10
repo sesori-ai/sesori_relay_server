@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/sesori-ai/sesori_relay_server/internal/auth"
+	"github.com/sesori-ai/sesori_relay_server/internal/notifications"
 	"github.com/sesori-ai/sesori_relay_server/internal/protocol"
 )
 
@@ -27,8 +28,18 @@ type testEnv struct {
 	privateKey *rsa.PrivateKey
 }
 
-func newTestEnv(t *testing.T) *testEnv {
+type testEnvOpts struct {
+	requireBridgeID     bool
+	notificationsClient *notifications.Client
+}
+
+func newTestEnv(t *testing.T, opts ...testEnvOpts) *testEnv {
 	t.Helper()
+
+	var o testEnvOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -52,7 +63,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	jwtAuth := auth.NewJWTAuthenticator(ks)
-	relayServer := NewServer(":0", jwtAuth, nil)
+	relayServer := NewServer(":0", jwtAuth, o.notificationsClient, o.requireBridgeID)
 
 	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		relayServer.handleWebSocket(w, r)
@@ -71,10 +82,33 @@ func (e *testEnv) wsURL() string {
 }
 
 func (e *testEnv) makeToken(userID string) string {
+	return e.makeAccessToken(userID)
+}
+
+func (e *testEnv) makeAccessToken(userID string) string {
 	claims := jwt.MapClaims{
 		"userId":    userID,
 		"tokenType": "access",
 		"aud":       "mobile",
+		"iss":       "auth-backend",
+		"exp":       float64(time.Now().Add(time.Hour).Unix()),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	signed, err := token.SignedString(e.privateKey)
+	if err != nil {
+		panic(fmt.Sprintf("SignedString: %v", err))
+	}
+	return signed
+}
+
+// makeBridgeToken mints a legacy bridge-typed JWT. The auth server no longer
+// issues these; the relay must reject them for both roles.
+func (e *testEnv) makeBridgeToken(userID, bridgeID string) string {
+	claims := jwt.MapClaims{
+		"userId":    userID,
+		"bridgeId":  bridgeID,
+		"tokenType": "bridge",
+		"aud":       "bridge",
 		"iss":       "auth-backend",
 		"exp":       float64(time.Now().Add(time.Hour).Unix()),
 	}
@@ -91,24 +125,37 @@ func (e *testEnv) dial(ctx context.Context) (*websocket.Conn, error) {
 	return conn, err
 }
 
-func sendAuth(ctx context.Context, conn *websocket.Conn, token, role string) error {
-	msg := fmt.Sprintf(`{"type":"auth","token":"%s","role":"%s"}`, token, role)
+func sendAuth(ctx context.Context, conn *websocket.Conn, token, role, bridgeID string) error {
+	var msg string
+	if bridgeID == "" {
+		msg = fmt.Sprintf(`{"type":"auth","token":"%s","role":"%s"}`, token, role)
+	} else {
+		msg = fmt.Sprintf(`{"type":"auth","token":"%s","role":"%s","bridgeId":%q}`, token, role, bridgeID)
+	}
 	return conn.Write(ctx, websocket.MessageText, []byte(msg))
 }
 
 func (e *testEnv) connectBridge(t *testing.T, userID string) *websocket.Conn {
+	return e.connectBridgeWithID(t, userID, "br_defaultTest01")
+}
+
+func (e *testEnv) connectBridgeWithID(t *testing.T, userID, bridgeID string) *websocket.Conn {
 	t.Helper()
 	ctx := context.Background()
 	conn, err := e.dial(ctx)
 	if err != nil {
 		t.Fatalf("dial bridge: %v", err)
 	}
-	if err := sendAuth(ctx, conn, e.makeToken(userID), "bridge"); err != nil {
+	if err := sendAuth(ctx, conn, e.makeAccessToken(userID), "bridge", bridgeID); err != nil {
 		conn.CloseNow()
 		t.Fatalf("sendAuth bridge: %v", err)
 	}
 	time.Sleep(60 * time.Millisecond)
 	return conn
+}
+
+func (e *testEnv) connectBridgeNoID(t *testing.T, userID string) *websocket.Conn {
+	return e.connectBridgeWithID(t, userID, "")
 }
 
 func (e *testEnv) connectPhone(t *testing.T, userID string) (*websocket.Conn, []byte) {
@@ -118,7 +165,7 @@ func (e *testEnv) connectPhone(t *testing.T, userID string) (*websocket.Conn, []
 	if err != nil {
 		t.Fatalf("dial phone: %v", err)
 	}
-	if err := sendAuth(ctx, conn, e.makeToken(userID), "phone"); err != nil {
+	if err := sendAuth(ctx, conn, e.makeToken(userID), "phone", ""); err != nil {
 		conn.CloseNow()
 		t.Fatalf("sendAuth phone: %v", err)
 	}
@@ -185,6 +232,22 @@ func expectNoMsg(t *testing.T, conn *websocket.Conn, timeout time.Duration) {
 	_, _, err := conn.Read(ctx)
 	if err == nil {
 		t.Error("expected no message but received one")
+	}
+}
+
+// expectOpen reads with a timeout and asserts the connection was NOT closed
+// by the server: a read timeout means the connection is still open, while a
+// close frame surfaces its status code.
+func expectOpen(t *testing.T, conn *websocket.Conn, timeout time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_, _, err := conn.Read(ctx)
+	if err == nil {
+		t.Fatal("expected no message on open connection, but received one")
+	}
+	if status := websocket.CloseStatus(err); status != -1 {
+		t.Fatalf("expected connection to stay open, got close status %d (err: %v)", status, err)
 	}
 }
 
@@ -341,7 +404,7 @@ func TestHandler_PhoneCap(t *testing.T) {
 	}
 	defer conn6.CloseNow()
 
-	if err := sendAuth(context.Background(), conn6, env.makeToken("user1"), "phone"); err != nil {
+	if err := sendAuth(context.Background(), conn6, env.makeToken("user1"), "phone", ""); err != nil {
 		t.Fatalf("sendAuth 6th phone: %v", err)
 	}
 	expectClose(t, conn6, websocket.StatusCode(protocol.CloseAccountFull))
@@ -531,4 +594,399 @@ func TestBinaryFraming_PhonePrepend(t *testing.T) {
 	if string(framed[2:]) != string(payload) {
 		t.Errorf("expected payload %q after prefix", payload)
 	}
+}
+
+func TestHandler_BridgeID_StoredOnConnection(t *testing.T) {
+	env := newTestEnv(t)
+
+	bridge := env.connectBridgeWithID(t, "user1", "br_abc12345")
+	defer bridge.CloseNow()
+
+	g := env.relay.manager.GetOrCreateGroup("user1")
+	g.mu.Lock()
+	bridgeID := ""
+	if g.Bridge != nil {
+		bridgeID = g.Bridge.BridgeID
+	}
+	g.mu.Unlock()
+	if bridgeID == "" {
+		t.Fatal("expected bridge to be set on group")
+	}
+	if bridgeID != "br_abc12345" {
+		t.Errorf("expected bridgeId br_abc12345 on connection, got %q", bridgeID)
+	}
+}
+
+func TestHandler_BridgeAuth_RequiresBridgeID_PostTransition(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true})
+
+	bridge := env.connectBridgeNoID(t, "user1")
+	expectClose(t, bridge, websocket.StatusCode(protocol.CloseAuthFailure))
+
+	if env.relay.manager.Count() != 0 {
+		t.Errorf("expected 0 groups (rejected), got %d", env.relay.manager.Count())
+	}
+}
+
+func TestHandler_BridgeAuth_AcceptsBridgeID_PostTransition(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true})
+
+	bridge := env.connectBridgeWithID(t, "user1", "br_abc12345")
+	defer bridge.CloseNow()
+
+	if env.relay.manager.Count() != 1 {
+		t.Errorf("expected 1 group, got %d", env.relay.manager.Count())
+	}
+}
+
+func TestHandler_BridgeAuth_AcceptsAccessTokenWithBridgeID(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial bridge: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := sendAuth(ctx, conn, env.makeAccessToken("user1"), "bridge", "br_abc12345"); err != nil {
+		t.Fatalf("sendAuth bridge: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+
+	if env.relay.manager.Count() != 1 {
+		t.Errorf("expected 1 group (access token + bridgeId accepted), got %d", env.relay.manager.Count())
+	}
+}
+
+func TestHandler_BridgeAuth_RejectsBridgeTypedToken(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true})
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial bridge: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := sendAuth(ctx, conn, env.makeBridgeToken("user1", "br_tokenBridge01"), "bridge", "br_tokenBridge01"); err != nil {
+		t.Fatalf("sendAuth bridge: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
+}
+
+func TestHandler_BridgeAuth_RejectsBridgeTokenWithoutBridgeID(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial bridge: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := sendAuth(ctx, conn, env.makeBridgeToken("user1", "br_tokenBridge01"), "bridge", ""); err != nil {
+		t.Fatalf("sendAuth bridge: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
+}
+
+func TestHandler_BridgeAuth_LegacyAllowedInTransition(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
+
+	bridge := env.connectBridgeNoID(t, "user1")
+	defer bridge.CloseNow()
+
+	if env.relay.manager.Count() != 1 {
+		t.Errorf("expected 1 group (legacy accepted in transition), got %d", env.relay.manager.Count())
+	}
+}
+
+func TestHandler_BridgeAuth_InvalidBridgeID_Format(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
+
+	bridge := env.connectBridgeWithID(t, "user1", "not-a-valid-bridge-id")
+	expectClose(t, bridge, websocket.StatusCode(protocol.CloseAuthFailure))
+}
+
+func TestHandler_BridgeAuth_InvalidBridgeID_FormatPostTransition(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true})
+
+	bridge := env.connectBridgeWithID(t, "user1", "br_short")
+	expectClose(t, bridge, websocket.StatusCode(protocol.CloseAuthFailure))
+}
+
+func TestHandler_PhoneAuth_IgnoresStrayBridgeID(t *testing.T) {
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true})
+
+	ctx := context.Background()
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial phone: %v", err)
+	}
+	defer conn.CloseNow()
+
+	token := env.makeToken("user1")
+	msg := fmt.Sprintf(`{"type":"auth","token":"%s","role":"phone","bridgeId":"br_strayValue"}`, token)
+	if err := conn.Write(ctx, websocket.MessageText, []byte(msg)); err != nil {
+		t.Fatalf("sendAuth: %v", err)
+	}
+
+	firstMsg := readTextMsg(t, conn, 2*time.Second)
+	m := parseJSON(t, firstMsg)
+	if m["type"] != "bridge_disconnected" {
+		t.Errorf("phone should be accepted; expected bridge_disconnected, got %q", m["type"])
+	}
+}
+
+func TestHandler_PhoneAuth_RejectsBridgeToken(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	conn, err := env.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial phone: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := sendAuth(ctx, conn, env.makeBridgeToken("user1", "br_phoneBridge1"), "phone", ""); err != nil {
+		t.Fatalf("sendAuth phone: %v", err)
+	}
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
+}
+
+// --- end-to-end: bridgeId is forwarded in the /internal/bridge-status payload ---
+
+func TestHandler_NotificationsClient_ForwardsBridgeID(t *testing.T) {
+	const secret = "test-relay-secret"
+	const bridgeID = "br_endToEnd1234"
+
+	type captured struct {
+		userID   string
+		bridgeID string
+		status   string
+	}
+
+	capturedCh := make(chan captured, 4)
+	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Relay-Secret"); got != secret {
+			t.Errorf("expected X-Relay-Secret %q, got %q", secret, got)
+		}
+		var payload struct {
+			UserID   string `json:"userId"`
+			BridgeID string `json:"bridgeId"`
+			Status   string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		select {
+		case capturedCh <- captured{userID: payload.UserID, bridgeID: payload.BridgeID, status: payload.Status}:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(notifServer.Close)
+
+	notif := notifications.NewClient(notifServer.URL, secret)
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+
+	conn := env.connectBridgeWithID(t, "user1", bridgeID)
+
+	select {
+	case c := <-capturedCh:
+		if c.userID != "user1" {
+			t.Errorf("expected userId user1, got %q", c.userID)
+		}
+		if c.bridgeID != bridgeID {
+			t.Errorf("expected bridgeId %q, got %q", bridgeID, c.bridgeID)
+		}
+		if c.status != notifications.BridgeStatusConnected {
+			t.Errorf("expected status connected, got %q", c.status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for connected notification")
+	}
+
+	conn.CloseNow()
+
+	select {
+	case c := <-capturedCh:
+		if c.userID != "user1" {
+			t.Errorf("expected userId user1, got %q", c.userID)
+		}
+		if c.bridgeID != bridgeID {
+			t.Errorf("expected bridgeId %q, got %q", bridgeID, c.bridgeID)
+		}
+		if c.status != notifications.BridgeStatusDisconnected {
+			t.Errorf("expected status disconnected, got %q", c.status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for disconnected notification")
+	}
+}
+
+func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing.T) {
+	const secret = "test-relay-secret"
+
+	type captured struct {
+		bridgeID string
+		status   string
+	}
+
+	capturedCh := make(chan captured, 8)
+	readCaptured := func(label string) captured {
+		t.Helper()
+		select {
+		case event := <-capturedCh:
+			return event
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s notification", label)
+			return captured{}
+		}
+	}
+	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Relay-Secret"); got != secret {
+			t.Errorf("expected X-Relay-Secret %q, got %q", secret, got)
+		}
+		var payload struct {
+			BridgeID string `json:"bridgeId"`
+			Status   string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		capturedCh <- captured{bridgeID: payload.BridgeID, status: payload.Status}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(notifServer.Close)
+
+	notif := notifications.NewClient(notifServer.URL, secret)
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+	oldBridge := env.connectBridgeWithID(t, "user1", "br_oldBridge01")
+
+	first := readCaptured("old bridge connected")
+	if first.bridgeID != "br_oldBridge01" || first.status != notifications.BridgeStatusConnected {
+		t.Fatalf("expected old bridge connected event, got %+v", first)
+	}
+
+	newBridge := env.connectBridgeWithID(t, "user1", "br_newBridge01")
+	defer newBridge.CloseNow()
+	defer oldBridge.CloseNow()
+
+	replacementEvents := []captured{
+		readCaptured("new bridge connected or old bridge disconnected"),
+		readCaptured("new bridge connected or old bridge disconnected"),
+	}
+	seenNewConnected := false
+	seenOldDisconnected := false
+	for _, event := range replacementEvents {
+		if event.bridgeID == "br_newBridge01" && event.status == notifications.BridgeStatusConnected {
+			seenNewConnected = true
+		}
+		if event.bridgeID == "br_oldBridge01" && event.status == notifications.BridgeStatusDisconnected {
+			seenOldDisconnected = true
+		}
+	}
+	if !seenNewConnected || !seenOldDisconnected {
+		t.Fatalf("expected new connected and old disconnected events, got %+v", replacementEvents)
+	}
+
+	newBridge.CloseNow()
+	fourth := readCaptured("new bridge disconnected")
+	if fourth.bridgeID != "br_newBridge01" || fourth.status != notifications.BridgeStatusDisconnected {
+		t.Fatalf("expected new bridge disconnected event, got %+v", fourth)
+	}
+}
+
+// --- revocation enforcement: 404 on the connect-time status report closes
+// the bridge with CloseBridgeRevoked; everything else is fail-open ---
+
+func TestHandler_BridgeRevoked_ConnectReport404_ClosesWith4006(t *testing.T) {
+	const secret = "test-relay-secret"
+
+	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Relay-Secret"); got != secret {
+			t.Errorf("expected X-Relay-Secret %q, got %q", secret, got)
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(notifServer.Close)
+
+	notif := notifications.NewClient(notifServer.URL, secret)
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+
+	conn := env.connectBridgeWithID(t, "user1", "br_revoked001")
+	defer conn.CloseNow()
+
+	expectClose(t, conn, websocket.StatusCode(protocol.CloseBridgeRevoked))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for env.relay.manager.Count() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected group cleanup after revoked close, got %d groups", env.relay.manager.Count())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestHandler_BridgeRevoked_ConnectReport5xx_FailOpen(t *testing.T) {
+	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(notifServer.Close)
+
+	notif := notifications.NewClient(notifServer.URL, "test-relay-secret")
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+
+	conn := env.connectBridgeWithID(t, "user1", "br_abc12345")
+	defer conn.CloseNow()
+
+	time.Sleep(150 * time.Millisecond) // let the async status report complete
+
+	if env.relay.manager.Count() != 1 {
+		t.Fatalf("expected bridge to stay connected on 5xx, got %d groups", env.relay.manager.Count())
+	}
+	expectOpen(t, conn, 300*time.Millisecond)
+}
+
+func TestHandler_BridgeRevoked_ConnectReportTransportError_FailOpen(t *testing.T) {
+	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	unreachableURL := notifServer.URL
+	notifServer.Close()
+
+	notif := notifications.NewClient(unreachableURL, "test-relay-secret")
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+
+	conn := env.connectBridgeWithID(t, "user1", "br_abc12345")
+	defer conn.CloseNow()
+
+	time.Sleep(150 * time.Millisecond) // let the async status report fail
+
+	if env.relay.manager.Count() != 1 {
+		t.Fatalf("expected bridge to stay connected on transport error, got %d groups", env.relay.manager.Count())
+	}
+	expectOpen(t, conn, 300*time.Millisecond)
+}
+
+func TestHandler_BridgeRevoked_LegacyNoBridgeID_404_FailOpen(t *testing.T) {
+	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(notifServer.Close)
+
+	notif := notifications.NewClient(notifServer.URL, "test-relay-secret")
+	env := newTestEnv(t, testEnvOpts{requireBridgeID: false, notificationsClient: notif})
+
+	conn := env.connectBridgeNoID(t, "user1")
+	defer conn.CloseNow()
+
+	time.Sleep(150 * time.Millisecond) // let the async status report complete
+
+	if env.relay.manager.Count() != 1 {
+		t.Fatalf("expected legacy bridge to stay connected, got %d groups", env.relay.manager.Count())
+	}
+	expectOpen(t, conn, 300*time.Millisecond)
 }

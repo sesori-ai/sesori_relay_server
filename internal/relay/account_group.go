@@ -8,9 +8,10 @@ import (
 )
 
 type Connection struct {
-	Conn   *websocket.Conn
-	ConnID uint16
-	Cancel context.CancelFunc
+	Conn     *websocket.Conn
+	ConnID   uint16
+	Cancel   context.CancelFunc
+	BridgeID string // empty for phones; populated for bridge connections (per-instance identifier from sesori_auth_server)
 }
 
 type AccountGroup struct {

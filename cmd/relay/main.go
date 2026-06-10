@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -21,6 +23,7 @@ func main() {
 	logLevel := flag.String("log-level", "info", "log level (debug, info, warn, error)")
 	authBackendURL := flag.String("auth-backend-url", "", "auth backend base URL (e.g. https://auth.example.com); auth is disabled when empty")
 	relayWebhookSecret := flag.String("relay-webhook-secret", "", "shared secret for auth server webhook")
+	requireBridgeID := flag.Bool("require-bridge-id", false, "require bridgeId field on bridge auth messages (transition gate; set true once the bridge fleet has rolled over)")
 	flag.Parse()
 
 	// Also honour the AUTH_BACKEND_URL environment variable (flag takes precedence).
@@ -29,6 +32,16 @@ func main() {
 	}
 	if *relayWebhookSecret == "" {
 		*relayWebhookSecret = os.Getenv("RELAY_WEBHOOK_SECRET")
+	}
+	if !flagWasSet("require-bridge-id") {
+		v, ok, err := envBool("RELAY_REQUIRE_BRIDGE_ID")
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "invalid RELAY_REQUIRE_BRIDGE_ID: %v\n", err)
+			os.Exit(1)
+		}
+		if ok {
+			*requireBridgeID = v
+		}
 	}
 
 	level := parseLogLevel(*logLevel)
@@ -43,7 +56,7 @@ func main() {
 		slog.Info("auth disabled (no --auth-backend-url provided)")
 	}
 
-	slog.Info("starting relay server", "addr", *addr, "log-level", *logLevel)
+	slog.Info("starting relay server", "addr", *addr, "log-level", *logLevel, "require-bridge-id", *requireBridgeID)
 
 	var authenticator *auth.JWTAuthenticator
 	if *authBackendURL != "" {
@@ -64,7 +77,7 @@ func main() {
 		slog.Info("push notifications disabled (no webhook secret)")
 	}
 
-	server := relay.NewServer(*addr, authenticator, notifs)
+	server := relay.NewServer(*addr, authenticator, notifs, *requireBridgeID)
 
 	if err := server.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server error", "err", err)
@@ -72,6 +85,29 @@ func main() {
 	}
 
 	slog.Info("relay server stopped")
+}
+
+func flagWasSet(name string) bool {
+	seen := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			seen = true
+		}
+	})
+	return seen
+}
+
+func envBool(name string) (bool, bool, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return false, false, nil
+	}
+
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, true, err
+	}
+	return value, true, nil
 }
 
 func parseLogLevel(s string) slog.Level {
