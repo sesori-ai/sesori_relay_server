@@ -85,14 +85,22 @@ The GitHub Actions workflows run on every push and PR:
 Every client sends this as the first WebSocket message (plaintext JSON):
 
 ```json
-{ "type": "auth", "token": "<JWT>", "role": "bridge", "bridgeId": "br_..." }
+{ "type": "auth", "token": "<user access JWT>", "role": "bridge", "bridgeId": "br_..." }
 ```
+
+Both roles authenticate with the user's **access token** (`tokenType:
+"access"`, `aud: "mobile"`); no other token type is accepted.
 
 The `bridgeId` field is optional for `role: "phone"` (ignored) and is
 optional for `role: "bridge"` unless the relay was started with
 `--require-bridge-id=true` (or `RELAY_REQUIRE_BRIDGE_ID=true`). Format:
 `^br_[A-Za-z0-9_-]{8,32}$`. The relay does not validate the value
-against any database; it only forwards it to the auth server.
+against any database at handshake time; it forwards it to the auth
+server in the bridge-status report. If the auth server answers that
+report with an explicit HTTP 404 (bridgeId unknown, revoked, or owned
+by another user), the relay closes that bridge connection with close
+code `4006` (bridge revoked). Transport errors, timeouts, and 5xx
+responses are fail-open: the connection stays up.
 
 Roles: `"bridge"` or `"phone"`. The relay closes the connection if auth fails.
 

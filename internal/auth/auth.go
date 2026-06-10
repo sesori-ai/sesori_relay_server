@@ -9,19 +9,8 @@ import (
 
 // AuthResult holds the authenticated identity and token metadata.
 type AuthResult struct {
-	UserID    string
-	Expiry    time.Time
-	TokenType string
-	Audience  string
-	BridgeID  string
-}
-
-func (r AuthResult) IsAccessToken() bool {
-	return r.TokenType == tokenTypeAccess && r.Audience == audienceMobile
-}
-
-func (r AuthResult) IsBridgeTokenFor(bridgeID string) bool {
-	return r.TokenType == tokenTypeBridge && r.Audience == audienceBridge && r.BridgeID == bridgeID
+	UserID string
+	Expiry time.Time
 }
 
 // Authenticator authenticates a WebSocket connection. Implementations read

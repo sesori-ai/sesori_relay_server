@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -83,36 +84,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridgeId required")
 			return
 		}
-		if authMsg.BridgeID != "" && !authResult.IsBridgeTokenFor(authMsg.BridgeID) {
-			s.manager.RemoveGroupIfEmpty(userID)
-			slog.Warn("bridge connection rejected: bridge token required", "userId", userID, "bridgeId", authMsg.BridgeID)
-			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridge token required")
-			return
-		}
-		if authMsg.BridgeID != "" && s.notifications != nil {
-			if err := s.notifications.ValidateBridgeToken(r.Context(), userID, authMsg.BridgeID, authMsg.Token); err != nil {
-				s.manager.RemoveGroupIfEmpty(userID)
-				slog.Warn("bridge connection rejected: bridge token revoked or unknown", "userId", userID, "bridgeId", authMsg.BridgeID, "err", err)
-				_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridge token revoked or unknown")
-				return
-			}
-		}
-		if !s.requireBridgeID && authMsg.BridgeID == "" {
-			if !authResult.IsAccessToken() {
-				s.manager.RemoveGroupIfEmpty(userID)
-				slog.Warn("legacy bridge connection rejected: access token required", "userId", userID)
-				_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "access token required")
-				return
-			}
+		if authMsg.BridgeID == "" {
 			slog.Warn("legacy bridge without bridgeId; set RELAY_REQUIRE_BRIDGE_ID=true to enforce", "userId", userID)
 		}
 		handleBridge(r.Context(), conn, group, s.manager, userID, authMsg.BridgeID, s.notifications)
-		return
-	}
-	if !authResult.IsAccessToken() {
-		s.manager.RemoveGroupIfEmpty(userID)
-		slog.Warn("phone connection rejected: access token required", "userId", userID)
-		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "access token required")
 		return
 	}
 	handlePhone(r.Context(), conn, group, s.manager, userID)
@@ -191,9 +166,23 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 
 	if notificationsClient != nil {
 		go func() {
-			if err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, bridgeID, notifications.BridgeStatusConnected); err != nil {
-				slog.Warn("failed to notify bridge connected", "error", err, "userId", userID, "bridgeId", bridgeID)
+			err := notificationsClient.NotifyBridgeStatus(context.Background(), userID, bridgeID, notifications.BridgeStatusConnected)
+			if err == nil {
+				return
 			}
+			if bridgeID != "" && errors.Is(err, notifications.ErrBridgeNotFound) {
+				// The auth server explicitly reported this bridgeId as unknown,
+				// revoked, or owned by another user. Close exactly this
+				// connection; unblocking its read loop runs the deferred
+				// cleanup below, which only touches the group if this
+				// connection is still the current bridge.
+				slog.Warn("bridge revoked; closing connection", "userId", userID, "bridgeId", bridgeID)
+				_ = conn.Close(websocket.StatusCode(protocol.CloseBridgeRevoked), "bridge revoked")
+				return
+			}
+			// Transport errors, timeouts, and 5xx are fail-open: log and keep
+			// the connection.
+			slog.Warn("failed to notify bridge connected", "error", err, "userId", userID, "bridgeId", bridgeID)
 		}()
 	}
 

@@ -13,9 +13,7 @@ import (
 
 const (
 	tokenTypeAccess = "access"
-	tokenTypeBridge = "bridge"
 	audienceMobile  = "mobile"
-	audienceBridge  = "bridge"
 	issuerBackend   = "auth-backend"
 )
 
@@ -68,7 +66,7 @@ func (a *JWTAuthenticator) Authenticate(ctx context.Context, conn *websocket.Con
 		return AuthResult{}, err
 	}
 
-	slog.Debug("connection authenticated", "userId", result.UserID, "tokenType", result.TokenType)
+	slog.Debug("connection authenticated", "userId", result.UserID)
 	return result, nil
 }
 
@@ -109,8 +107,9 @@ func (a *JWTAuthenticator) verifyToken(raw string) (*jwt.Token, error) {
 	return token, err
 }
 
-// validateClaims extracts and validates the required JWT claims. Accepted token
-// types are "access" and "bridge"; "refresh" tokens are rejected.
+// validateClaims extracts and validates the required JWT claims. Only user
+// access tokens (tokenType "access", aud "mobile") are accepted; every other
+// token type (refresh, legacy bridge-typed tokens) is rejected.
 func validateClaims(token *jwt.Token) (AuthResult, error) {
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
@@ -129,7 +128,7 @@ func validateClaims(token *jwt.Token) (AuthResult, error) {
 	if err != nil {
 		return AuthResult{}, err
 	}
-	if tokenType != tokenTypeAccess && tokenType != tokenTypeBridge {
+	if tokenType != tokenTypeAccess {
 		return AuthResult{}, fmt.Errorf("invalid tokenType claim: %s", tokenType)
 	}
 
@@ -137,11 +136,8 @@ func validateClaims(token *jwt.Token) (AuthResult, error) {
 	if err != nil {
 		return AuthResult{}, err
 	}
-	if aud != audienceMobile && aud != audienceBridge {
+	if aud != audienceMobile {
 		return AuthResult{}, fmt.Errorf("invalid aud claim: %s", aud)
-	}
-	if (tokenType == tokenTypeAccess && aud != audienceMobile) || (tokenType == tokenTypeBridge && aud != audienceBridge) {
-		return AuthResult{}, fmt.Errorf("invalid tokenType/aud pair: %s/%s", tokenType, aud)
 	}
 
 	iss, err := requiredStringClaim(claims, "iss")
@@ -157,23 +153,9 @@ func validateClaims(token *jwt.Token) (AuthResult, error) {
 		return AuthResult{}, err
 	}
 
-	bridgeID := ""
-	if tokenType == tokenTypeBridge {
-		bridgeID, err = requiredStringClaim(claims, "bridgeId")
-		if err != nil {
-			return AuthResult{}, err
-		}
-		if bridgeID == "" {
-			return AuthResult{}, fmt.Errorf("bridgeId claim is empty")
-		}
-	}
-
 	return AuthResult{
-		UserID:    userId,
-		Expiry:    time.Unix(int64(expFloat), 0),
-		TokenType: tokenType,
-		Audience:  aud,
-		BridgeID:  bridgeID,
+		UserID: userId,
+		Expiry: time.Unix(int64(expFloat), 0),
 	}, nil
 }
 
