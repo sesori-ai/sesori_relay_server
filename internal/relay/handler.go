@@ -261,6 +261,18 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		connID := binary.BigEndian.Uint16(data[:2])
 		payload := data[2:]
 
+		// Enforce the single-active-bridge invariant on every frame: a bridge
+		// displaced by a newer connection for this account must never relay to
+		// phones, even for frames it had already queued/read before its close
+		// completes. This guard is timing-independent — it does not rely on the
+		// displaced connection's close/cancel racing the read loop.
+		group.mu.Lock()
+		isCurrentBridge := group.Bridge == newConn
+		group.mu.Unlock()
+		if !isCurrentBridge {
+			continue
+		}
+
 		if connID == 0 {
 			targets := group.AllPhones()
 			for _, target := range targets {
