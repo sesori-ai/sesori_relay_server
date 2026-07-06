@@ -264,13 +264,17 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		payload := data[2:]
 
 		// Enforce the single-active-bridge invariant on every frame: a bridge
-		// displaced by a newer connection for this account must never relay to
+		// displaced by a newer connection for this account must not relay to
 		// phones, even for frames it had already queued/read before its close
 		// completes. The current-bridge check is folded into the same locked
 		// target selection (PhonesIfCurrentBridge / PhoneIfCurrentBridge), so a
-		// bridge that stops being current between reading a frame and routing it
-		// gets no targets — no TOCTOU window, and no reliance on the displaced
-		// connection's close/cancel racing the read loop.
+		// bridge displaced before it routes a frame gets no targets — without
+		// relying on the displaced connection's close/cancel racing the read
+		// loop. The lock is not held across the writes below (that would
+		// serialize all relay traffic on socket I/O), so a bridge displaced in
+		// the microseconds between snapshot and write can still deliver the one
+		// frame it is mid-routing; that frame was read while it was the active
+		// bridge, so its late arrival during handover is benign.
 		if connID == 0 {
 			for _, target := range group.PhonesIfCurrentBridge(newConn) {
 				_ = target.Conn.Write(ctx, websocket.MessageBinary, payload)

@@ -54,11 +54,19 @@ func (g *AccountGroup) AllPhones() []*Connection {
 	return phones
 }
 
-// PhonesIfCurrentBridge atomically snapshots all phone connections, but only if
-// bridge is still this group's current bridge. A bridge displaced by a newer
-// connection gets nil, so its read loop can never fan a frame out to phones —
-// the current-bridge check and the target selection happen under one lock hold,
-// leaving no window where a stale bridge could pass the check and then relay.
+// PhonesIfCurrentBridge snapshots all phone connections, but only if bridge is
+// still this group's current bridge (nil otherwise) — the current-bridge check
+// and the target selection happen under one lock hold. This drops all frames
+// from a bridge that was already displaced before it routes them.
+//
+// It does NOT hold the lock across the caller's subsequent websocket writes
+// (that would serialize all relay traffic on socket I/O), so a bridge that is
+// current at snapshot time but displaced microseconds later can still deliver
+// the single frame it is mid-routing. That residual frame is one the bridge
+// read while it was the active bridge, so delivering it during handover is
+// benign — indistinguishable from a frame sent just before the swap. Closing
+// that last window would require writing under the group lock, which is not
+// worth the contention.
 func (g *AccountGroup) PhonesIfCurrentBridge(bridge *Connection) []*Connection {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -72,9 +80,10 @@ func (g *AccountGroup) PhonesIfCurrentBridge(bridge *Connection) []*Connection {
 	return phones
 }
 
-// PhoneIfCurrentBridge atomically returns the phone with connID, but only if
-// bridge is still this group's current bridge (nil otherwise). Same TOCTOU-free
-// guarantee as PhonesIfCurrentBridge for the unicast routing path.
+// PhoneIfCurrentBridge returns the phone with connID, but only if bridge is
+// still this group's current bridge (nil otherwise). Same narrowed-window
+// characterization as PhonesIfCurrentBridge for the unicast routing path: the
+// check + lookup are atomic, but the caller's write is not under the lock.
 func (g *AccountGroup) PhoneIfCurrentBridge(bridge *Connection, connID uint16) *Connection {
 	g.mu.Lock()
 	defer g.mu.Unlock()
