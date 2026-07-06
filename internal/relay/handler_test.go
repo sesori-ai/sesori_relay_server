@@ -346,7 +346,9 @@ func TestHandler_BridgeReplacement(t *testing.T) {
 	bridge2 := env.connectBridge(t, "user1")
 	defer bridge2.CloseNow()
 
-	expectAnyClose(t, bridge1)
+	// A displaced bridge is closed with the dedicated CloseBridgeReplaced code
+	// so it can recognise the takeover and back off instead of tight-looping.
+	expectClose(t, bridge1, websocket.StatusCode(protocol.CloseBridgeReplaced))
 
 	if env.relay.manager.Count() != 1 {
 		t.Errorf("expected 1 group after replacement, got %d", env.relay.manager.Count())
@@ -873,6 +875,18 @@ func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing
 	newBridge := env.connectBridgeWithID(t, "user1", "br_newBridge01")
 	defer newBridge.CloseNow()
 	defer oldBridge.CloseNow()
+
+	// A real displaced bridge keeps reading, so it observes and replies to the
+	// server's CloseBridgeReplaced frame, completing the close handshake
+	// promptly. Drain the old bridge here so the server's close does not sit in
+	// its handshake-wait timeout (which would delay the disconnect bookkeeping).
+	go func() {
+		for {
+			if _, _, err := oldBridge.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
 
 	replacementEvents := []captured{
 		readCaptured("new bridge connected or old bridge disconnected"),
