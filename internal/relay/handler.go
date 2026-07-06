@@ -157,32 +157,34 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 
 	if oldBridge != nil {
 		// Displace the old bridge with the dedicated takeover close code so the
-		// displaced bridge can recognise the takeover and back off instead of
-		// tight-looping. Three properties matter here:
-		//   1. The close frame carries CloseBridgeReplaced. Conn.Close is a
-		//      compare-and-swap on the connection's closing state: whoever
-		//      closes first wins. If we cancelled the old read loop first, its
-		//      ctx-cancel teardown would win the CAS and drop the socket
-		//      abnormally (EOF), so the displaced bridge would never see 4007.
-		//      Close therefore runs (and wins the CAS + writes the frame)
-		//      before Cancel.
-		//   2. Conn.Close does not block this new bridge's connect flow: it
-		//      writes the frame then waits up to 5s for the peer's close reply
-		//      (holding the read lock), so it runs off the hot path in a
-		//      goroutine.
-		//   3. The old bridge's own teardown (phone bridge_disconnected +
-		//      disconnect notification) must not wait out that 5s handshake.
-		//      Cancel the old connection's context on a short delay: 100ms is
-		//      ample for Close to win the CAS and flush the close frame to the
-		//      socket, after which the cancel unblocks the old read loop so its
-		//      teardown fires promptly instead of after the handshake timeout.
+		// displaced bridge recognises the takeover and backs off instead of
+		// tight-looping. Correctness rests on a strict order — Close, then
+		// Cancel — run off the hot path in one goroutine:
+		//
+		//   * Close wins the close CAS and writes the CloseBridgeReplaced frame
+		//     synchronously (writeClose runs before the handshake wait), so the
+		//     displaced bridge reliably observes 4007. Cancelling first would
+		//     instead let the old read loop's ctx-cancel teardown / handler
+		//     return close the socket abnormally (EOF) and race the frame away.
+		//   * While Close then waits for the peer's close reply it HOLDS the
+		//     connection read lock, so the old bridge's read loop is parked and
+		//     cannot forward any stale frame to phones after group.Bridge was
+		//     swapped — the takeover window is closed without a separate guard.
+		//   * Cancel runs after Close returns to release the old connection
+		//     context (ping loop, deferred cleanup). It is not on this new
+		//     bridge's connect path (the whole block is a goroutine), so a
+		//     slow/non-responsive displaced peer only delays that bridge's own
+		//     disconnect bookkeeping up to the handshake timeout — a best-effort
+		//     lag, never a correctness issue, and phones already learned of the
+		//     new bridge via the bridge_connected writes below.
+		//
 		// Keep the "replaced" reason as a rollout fallback the bridge can match
 		// on until it keys purely on CloseBridgeReplaced; the code is
 		// authoritative.
 		go func() {
 			_ = oldBridge.Conn.Close(websocket.StatusCode(protocol.CloseBridgeReplaced), "replaced")
+			oldBridge.Cancel()
 		}()
-		time.AfterFunc(100*time.Millisecond, oldBridge.Cancel)
 	}
 
 	for _, phone := range phones {

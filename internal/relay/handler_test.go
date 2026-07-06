@@ -876,6 +876,19 @@ func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing
 	defer newBridge.CloseNow()
 	defer oldBridge.CloseNow()
 
+	// A real displaced bridge keeps reading, so it observes and replies to the
+	// server's CloseBridgeReplaced frame, completing the close handshake
+	// promptly (which then unblocks the old connection's teardown). Drain the
+	// old bridge here so the server's close does not sit out its full
+	// handshake-wait timeout waiting on an unresponsive peer.
+	go func() {
+		for {
+			if _, _, err := oldBridge.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+
 	replacementEvents := []captured{
 		readCaptured("new bridge connected or old bridge disconnected"),
 		readCaptured("new bridge connected or old bridge disconnected"),
