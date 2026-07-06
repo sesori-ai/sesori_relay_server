@@ -166,10 +166,6 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		//     displaced bridge reliably observes 4007. Cancelling first would
 		//     instead let the old read loop's ctx-cancel teardown / handler
 		//     return close the socket abnormally (EOF) and race the frame away.
-		//   * While Close then waits for the peer's close reply it HOLDS the
-		//     connection read lock, so the old bridge's read loop is parked and
-		//     cannot forward any stale frame to phones after group.Bridge was
-		//     swapped — the takeover window is closed without a separate guard.
 		//   * Cancel runs after Close returns to release the old connection
 		//     context (ping loop, deferred cleanup). It is not on this new
 		//     bridge's connect path (the whole block is a goroutine), so a
@@ -177,6 +173,12 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		//     disconnect bookkeeping up to the handshake timeout — a best-effort
 		//     lag, never a correctness issue, and phones already learned of the
 		//     new bridge via the bridge_connected writes below.
+		//
+		// The single-active-bridge invariant does NOT depend on this close
+		// timing: the read loop's PhonesIfCurrentBridge / PhoneIfCurrentBridge
+		// routing (see below) drops any frame from a bridge that is no longer
+		// group.Bridge, so a displaced bridge can never relay even in the window
+		// before its close/cancel lands.
 		//
 		// Keep the "replaced" reason as a rollout fallback the bridge can match
 		// on until it keys purely on CloseBridgeReplaced; the code is
@@ -264,26 +266,19 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		// Enforce the single-active-bridge invariant on every frame: a bridge
 		// displaced by a newer connection for this account must never relay to
 		// phones, even for frames it had already queued/read before its close
-		// completes. This guard is timing-independent — it does not rely on the
-		// displaced connection's close/cancel racing the read loop.
-		group.mu.Lock()
-		isCurrentBridge := group.Bridge == newConn
-		group.mu.Unlock()
-		if !isCurrentBridge {
-			continue
-		}
-
+		// completes. The current-bridge check is folded into the same locked
+		// target selection (PhonesIfCurrentBridge / PhoneIfCurrentBridge), so a
+		// bridge that stops being current between reading a frame and routing it
+		// gets no targets — no TOCTOU window, and no reliance on the displaced
+		// connection's close/cancel racing the read loop.
 		if connID == 0 {
-			targets := group.AllPhones()
-			for _, target := range targets {
+			for _, target := range group.PhonesIfCurrentBridge(newConn) {
 				_ = target.Conn.Write(ctx, websocket.MessageBinary, payload)
 			}
 			continue
 		}
 
-		group.mu.Lock()
-		target := group.Phones[connID]
-		group.mu.Unlock()
+		target := group.PhoneIfCurrentBridge(newConn, connID)
 		if target == nil {
 			continue
 		}

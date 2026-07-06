@@ -54,6 +54,36 @@ func (g *AccountGroup) AllPhones() []*Connection {
 	return phones
 }
 
+// PhonesIfCurrentBridge atomically snapshots all phone connections, but only if
+// bridge is still this group's current bridge. A bridge displaced by a newer
+// connection gets nil, so its read loop can never fan a frame out to phones —
+// the current-bridge check and the target selection happen under one lock hold,
+// leaving no window where a stale bridge could pass the check and then relay.
+func (g *AccountGroup) PhonesIfCurrentBridge(bridge *Connection) []*Connection {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.Bridge != bridge {
+		return nil
+	}
+	phones := make([]*Connection, 0, len(g.Phones))
+	for _, p := range g.Phones {
+		phones = append(phones, p)
+	}
+	return phones
+}
+
+// PhoneIfCurrentBridge atomically returns the phone with connID, but only if
+// bridge is still this group's current bridge (nil otherwise). Same TOCTOU-free
+// guarantee as PhonesIfCurrentBridge for the unicast routing path.
+func (g *AccountGroup) PhoneIfCurrentBridge(bridge *Connection, connID uint16) *Connection {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.Bridge != bridge {
+		return nil
+	}
+	return g.Phones[connID]
+}
+
 // IsEmpty returns true if the group has no bridge and no phone connections.
 func (g *AccountGroup) IsEmpty() bool {
 	g.mu.Lock()
