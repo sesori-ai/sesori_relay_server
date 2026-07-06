@@ -175,6 +175,32 @@ func TestGroupManager_RemoveGroupIfEmpty_NonExistent(t *testing.T) {
 	}
 }
 
+func TestGroupManager_HasLiveBridgeWithID(t *testing.T) {
+	m := NewGroupManager()
+
+	// No group / no bridge yet.
+	if m.HasLiveBridgeWithID("user1", "br_x") {
+		t.Error("expected false with no group")
+	}
+
+	g := m.GetOrCreateGroup("user1")
+	if m.HasLiveBridgeWithID("user1", "br_x") {
+		t.Error("expected false with no bridge")
+	}
+
+	g.Bridge = &Connection{BridgeID: "br_x"}
+	if !m.HasLiveBridgeWithID("user1", "br_x") {
+		t.Error("expected true for the live bridge id")
+	}
+	if m.HasLiveBridgeWithID("user1", "br_y") {
+		t.Error("expected false for a different bridge id")
+	}
+	// An empty bridgeId (legacy) is never matched.
+	if m.HasLiveBridgeWithID("user1", "") {
+		t.Error("expected false for an empty bridge id")
+	}
+}
+
 // A stale handler whose cleanup runs late must not delete a fresh group that a
 // newer connection created for the same user after the stale handler's group
 // was already removed.

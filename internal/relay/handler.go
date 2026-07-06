@@ -229,6 +229,16 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		group.mu.Unlock()
 		shouldNotifyDisconnected := isCurrent || (bridgeID != "" && bridgeID != currentBridgeID)
 
+		// Suppress the disconnect notification if this bridgeId is already live
+		// again on the user's current group: a displaced handler whose teardown
+		// runs late (widened by the Close-then-Cancel ordering) must not mark a
+		// freshly-reconnected bridge with the same id offline in the auth server
+		// after its connected notification. This checks the manager's current
+		// registration, not this handler's own (possibly stale) group.
+		if shouldNotifyDisconnected && manager.HasLiveBridgeWithID(userID, bridgeID) {
+			shouldNotifyDisconnected = false
+		}
+
 		if isCurrent {
 			phones := group.AllPhones()
 			for _, phone := range phones {
