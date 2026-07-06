@@ -73,13 +73,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("connection joined group", "userID", userID, "role", authMsg.Role)
 	if authMsg.Role == protocol.RoleBridge {
 		if authMsg.BridgeID != "" && !bridgeIDRegexp.MatchString(authMsg.BridgeID) {
-			s.manager.RemoveGroupIfEmpty(userID)
+			s.manager.RemoveGroupIfEmpty(userID, group)
 			slog.Warn("bridge connection rejected: invalid bridgeId format", "userId", userID, "bridgeId", authMsg.BridgeID)
 			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid bridgeId format")
 			return
 		}
 		if s.requireBridgeID && authMsg.BridgeID == "" {
-			s.manager.RemoveGroupIfEmpty(userID)
+			s.manager.RemoveGroupIfEmpty(userID, group)
 			slog.Warn("bridge connection rejected: bridgeId required", "userId", userID)
 			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridgeId required")
 			return
@@ -244,7 +244,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 			}()
 		}
 
-		manager.RemoveGroupIfEmpty(userID)
+		manager.RemoveGroupIfEmpty(userID, group)
 	}()
 
 	conn.SetReadLimit(maxMessageSize)
@@ -349,7 +349,7 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 			}
 			_ = bridge.Conn.Write(ctx, websocket.MessageText, phoneDisconnMsg)
 		}
-		manager.RemoveGroupIfEmpty(userID)
+		manager.RemoveGroupIfEmpty(userID, group)
 	}()
 
 	conn.SetReadLimit(maxMessageSize)

@@ -26,11 +26,17 @@ func (m *GroupManager) GetOrCreateGroup(userID string) *AccountGroup {
 	return g
 }
 
-func (m *GroupManager) RemoveGroupIfEmpty(userID string) {
+// RemoveGroupIfEmpty deletes group from the manager only if it is still the
+// current group instance registered for userID AND it is empty. Passing the
+// caller's own group instance (rather than deleting by userID key alone) makes
+// cleanup safe against group recreation: a stale handler whose teardown runs
+// late must not delete a fresh group that a newer connection created for the
+// same user in the meantime.
+func (m *GroupManager) RemoveGroupIfEmpty(userID string, group *AccountGroup) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if g, ok := m.groups[userID]; ok {
+	if g, ok := m.groups[userID]; ok && g == group {
 		if g.IsEmpty() {
 			delete(m.groups, userID)
 		}
