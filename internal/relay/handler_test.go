@@ -346,11 +346,51 @@ func TestHandler_BridgeReplacement(t *testing.T) {
 	bridge2 := env.connectBridge(t, "user1")
 	defer bridge2.CloseNow()
 
-	expectAnyClose(t, bridge1)
+	// A displaced bridge is closed with the dedicated CloseBridgeReplaced code
+	// so it can recognise the takeover and back off instead of tight-looping.
+	expectClose(t, bridge1, websocket.StatusCode(protocol.CloseBridgeReplaced))
 
 	if env.relay.manager.Count() != 1 {
 		t.Errorf("expected 1 group after replacement, got %d", env.relay.manager.Count())
 	}
+}
+
+// A bridge displaced by a newer connection must not relay frames to phones,
+// even a frame it managed to send before its close completed — the read-loop
+// single-active-bridge guard drops it regardless of close/cancel timing.
+func TestHandler_DisplacedBridgeDoesNotRelayToPhones(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	bridge1 := env.connectBridge(t, "user1")
+	defer bridge1.CloseNow()
+
+	phone, _ := env.connectPhone(t, "user1")
+	defer phone.CloseNow()
+	readTextMsg(t, bridge1, 2*time.Second) // phone_connected on bridge1
+
+	// Displace bridge1. Immediately try to relay a frame from the now-stale
+	// bridge before it has observed its close. (bridge2 receives no
+	// phone_connected: the phone was already connected before the replacement.)
+	bridge2 := env.connectBridge(t, "user1")
+	defer bridge2.CloseNow()
+
+	payload := []byte("stale-broadcast")
+	frame := append([]byte{0x00, 0x00}, payload...)
+	// Best-effort: the write may fail if the close already landed; either way
+	// the read-loop single-active-bridge guard must drop it.
+	_ = bridge1.Write(ctx, websocket.MessageBinary, frame)
+
+	// The phone legitimately receives a bridge_connected text notice for the
+	// new bridge. Assert exactly that (a text frame, not the stale binary one):
+	// if the guard failed, this read would instead surface the binary payload.
+	notice := readTextMsg(t, phone, 2*time.Second)
+	nm := parseJSON(t, notice)
+	if nm["type"] != "bridge_connected" {
+		t.Errorf("phone expected bridge_connected, got %q", nm["type"])
+	}
+	// And no stale binary frame follows it.
+	expectNoMsg(t, phone, 500*time.Millisecond)
 }
 
 func TestHandler_PhoneNoBridge(t *testing.T) {
@@ -873,6 +913,19 @@ func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing
 	newBridge := env.connectBridgeWithID(t, "user1", "br_newBridge01")
 	defer newBridge.CloseNow()
 	defer oldBridge.CloseNow()
+
+	// A real displaced bridge keeps reading, so it observes and replies to the
+	// server's CloseBridgeReplaced frame, completing the close handshake
+	// promptly (which then unblocks the old connection's teardown). Drain the
+	// old bridge here so the server's close does not sit out its full
+	// handshake-wait timeout waiting on an unresponsive peer.
+	go func() {
+		for {
+			if _, _, err := oldBridge.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
 
 	replacementEvents := []captured{
 		readCaptured("new bridge connected or old bridge disconnected"),

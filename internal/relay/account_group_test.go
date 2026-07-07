@@ -129,7 +129,7 @@ func TestGroupManager_RemoveGroupIfEmpty_WithBridge(t *testing.T) {
 
 	g.Bridge = &Connection{}
 
-	m.RemoveGroupIfEmpty("user1")
+	m.RemoveGroupIfEmpty("user1", g)
 
 	if m.Count() != 1 {
 		t.Errorf("group with bridge should not be removed, count=%d", m.Count())
@@ -142,7 +142,7 @@ func TestGroupManager_RemoveGroupIfEmpty_WithPhone(t *testing.T) {
 
 	g.Phones[1] = &Connection{}
 
-	m.RemoveGroupIfEmpty("user1")
+	m.RemoveGroupIfEmpty("user1", g)
 
 	if m.Count() != 1 {
 		t.Errorf("group with phone should not be removed, count=%d", m.Count())
@@ -151,14 +151,14 @@ func TestGroupManager_RemoveGroupIfEmpty_WithPhone(t *testing.T) {
 
 func TestGroupManager_RemoveGroupIfEmpty_Empty(t *testing.T) {
 	m := NewGroupManager()
-	m.GetOrCreateGroup("user1")
+	g1 := m.GetOrCreateGroup("user1")
 	m.GetOrCreateGroup("user2")
 
 	if m.Count() != 2 {
 		t.Fatalf("expected count 2, got %d", m.Count())
 	}
 
-	m.RemoveGroupIfEmpty("user1")
+	m.RemoveGroupIfEmpty("user1", g1)
 
 	if m.Count() != 1 {
 		t.Errorf("empty group should be removed, count=%d", m.Count())
@@ -168,26 +168,79 @@ func TestGroupManager_RemoveGroupIfEmpty_Empty(t *testing.T) {
 func TestGroupManager_RemoveGroupIfEmpty_NonExistent(t *testing.T) {
 	m := NewGroupManager()
 
-	m.RemoveGroupIfEmpty("nonexistent")
+	m.RemoveGroupIfEmpty("nonexistent", NewAccountGroup("nonexistent"))
 
 	if m.Count() != 0 {
 		t.Errorf("expected count 0, got %d", m.Count())
 	}
 }
 
+func TestGroupManager_HasLiveBridgeWithID(t *testing.T) {
+	m := NewGroupManager()
+
+	// No group / no bridge yet.
+	if m.HasLiveBridgeWithID("user1", "br_x") {
+		t.Error("expected false with no group")
+	}
+
+	g := m.GetOrCreateGroup("user1")
+	if m.HasLiveBridgeWithID("user1", "br_x") {
+		t.Error("expected false with no bridge")
+	}
+
+	g.Bridge = &Connection{BridgeID: "br_x"}
+	if !m.HasLiveBridgeWithID("user1", "br_x") {
+		t.Error("expected true for the live bridge id")
+	}
+	if m.HasLiveBridgeWithID("user1", "br_y") {
+		t.Error("expected false for a different bridge id")
+	}
+	// An empty bridgeId (legacy) is never matched.
+	if m.HasLiveBridgeWithID("user1", "") {
+		t.Error("expected false for an empty bridge id")
+	}
+}
+
+// A stale handler whose cleanup runs late must not delete a fresh group that a
+// newer connection created for the same user after the stale handler's group
+// was already removed.
+func TestGroupManager_RemoveGroupIfEmpty_DoesNotRemoveRecreatedGroup(t *testing.T) {
+	m := NewGroupManager()
+	stale := m.GetOrCreateGroup("user1")
+
+	// The stale group is removed (empty), then a fresh group is created for the
+	// same user and gains a live bridge.
+	m.RemoveGroupIfEmpty("user1", stale)
+	fresh := m.GetOrCreateGroup("user1")
+	if fresh == stale {
+		t.Fatal("expected a distinct fresh group instance")
+	}
+
+	// The stale handler's late cleanup for the SAME userID must be a no-op: it
+	// does not own the fresh group instance.
+	m.RemoveGroupIfEmpty("user1", stale)
+
+	if m.Count() != 1 {
+		t.Errorf("fresh group must survive a stale handler's cleanup, count=%d", m.Count())
+	}
+	if got := m.GetOrCreateGroup("user1"); got != fresh {
+		t.Error("fresh group instance must remain registered for the user")
+	}
+}
+
 func TestGroupManager_Count_ReflectsRemovals(t *testing.T) {
 	m := NewGroupManager()
 
-	m.GetOrCreateGroup("a")
-	m.GetOrCreateGroup("b")
+	ga := m.GetOrCreateGroup("a")
+	gb := m.GetOrCreateGroup("b")
 	m.GetOrCreateGroup("c")
 
 	if m.Count() != 3 {
 		t.Fatalf("expected 3, got %d", m.Count())
 	}
 
-	m.RemoveGroupIfEmpty("a")
-	m.RemoveGroupIfEmpty("b")
+	m.RemoveGroupIfEmpty("a", ga)
+	m.RemoveGroupIfEmpty("b", gb)
 
 	if m.Count() != 1 {
 		t.Errorf("expected 1 after two removals, got %d", m.Count())
