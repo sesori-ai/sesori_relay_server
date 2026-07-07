@@ -163,9 +163,10 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		//
 		//   * Close wins the close CAS and writes the CloseBridgeReplaced frame
 		//     synchronously (writeClose runs before the handshake wait), so the
-		//     displaced bridge reliably observes 4007. Cancelling first would
-		//     instead let the old read loop's ctx-cancel teardown / handler
-		//     return close the socket abnormally (EOF) and race the frame away.
+		//     displaced bridge observes 4007 on the common path. Cancelling
+		//     first would instead let the old read loop's ctx-cancel teardown /
+		//     handler return close the socket abnormally (EOF) and race the
+		//     frame away.
 		//   * Cancel runs after Close returns to release the old connection
 		//     context (ping loop, deferred cleanup). It is not on this new
 		//     bridge's connect path (the whole block is a goroutine), so a
@@ -173,6 +174,20 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		//     disconnect bookkeeping up to the handshake timeout — a best-effort
 		//     lag, never a correctness issue, and phones already learned of the
 		//     new bridge via the bridge_connected writes below.
+		//
+		// 4007 delivery is deliberately best-effort (accepted tradeoff, PR #7):
+		// the close frame contends for the connection's frame-write mutex with
+		// any in-flight phone→bridge write (handlePhone), so if the displaced
+		// bridge stalls its reads while such a write is blocked, the close
+		// write can time out (~5s) and drop the TCP connection without
+		// delivering 4007 — the displaced bridge then sees an abnormal close
+		// (1006) and retries on its normal backoff instead of the takeover
+		// backoff. coder/websocket offers no way to preempt the in-flight
+		// write: cancelling its context hard-closes the whole connection
+		// (timeoutLoop -> close), which loses 4007 anyway. The miss is
+		// self-limiting — the reconnected bridge is displaced again, almost
+		// certainly with no write in flight, and observes 4007 then — so it
+		// degrades to at most one extra reconnect, not a reconnect war.
 		//
 		// The single-active-bridge invariant does NOT depend on this close
 		// timing: the read loop's PhonesIfCurrentBridge / PhoneIfCurrentBridge
