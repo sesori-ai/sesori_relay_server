@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -10,30 +11,41 @@ import (
 	"github.com/sesori-ai/sesori_relay_server/internal/notifications"
 )
 
+const connectionStatsLogInterval = 10 * time.Minute
+
 // Server is the relay WebSocket server. It manages rooms, rate limiting, and
 // delegates authentication to the provided Authenticator (nil = auth disabled).
 type Server struct {
-	addr            string
-	manager         *GroupManager
-	rateLimiter     *RateLimiter
-	httpServer      *http.Server
-	jwtAuth         *auth.JWTAuthenticator
-	notifications   *notifications.Client
-	requireBridgeID bool
+	addr                string
+	manager             *GroupManager
+	rateLimiter         *RateLimiter
+	httpServer          *http.Server
+	jwtAuth             *auth.JWTAuthenticator
+	notifications       *notifications.Client
+	requireBridgeID     bool
+	trustCFConnectingIP bool
 }
 
 // NewServer creates a relay server. Pass a nil authenticator to disable auth.
 // requireBridgeID enforces that every bridge connection sends a bridgeId in
 // its auth message; when false, bridges without bridgeId are accepted (legacy
 // path) and no bridgeId is forwarded to the auth server.
-func NewServer(addr string, jwtAuth *auth.JWTAuthenticator, notifs *notifications.Client, requireBridgeID bool) *Server {
+// trustCFConnectingIP uses Cloudflare's visitor IP header for rate limiting and
+// must only be enabled when direct access to the origin is blocked.
+func NewServer(
+	addr string,
+	jwtAuth *auth.JWTAuthenticator,
+	notifs *notifications.Client,
+	requireBridgeID, trustCFConnectingIP bool,
+) *Server {
 	return &Server{
-		addr:            addr,
-		manager:         NewGroupManager(),
-		rateLimiter:     NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
-		jwtAuth:         jwtAuth,
-		notifications:   notifs,
-		requireBridgeID: requireBridgeID,
+		addr:                addr,
+		manager:             NewGroupManager(),
+		rateLimiter:         NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
+		jwtAuth:             jwtAuth,
+		notifications:       notifs,
+		requireBridgeID:     requireBridgeID,
+		trustCFConnectingIP: trustCFConnectingIP,
 	}
 }
 
@@ -42,6 +54,10 @@ func (s *Server) Manager() *GroupManager {
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	statsCtx, stopStats := context.WithCancel(ctx)
+	defer stopStats()
+	go s.logConnectionStats(statsCtx)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", s.handleWebSocket)
 	mux.HandleFunc("GET /status", handleStatus)
@@ -60,6 +76,27 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	return s.httpServer.ListenAndServe()
+}
+
+func (s *Server) logConnectionStats(ctx context.Context) {
+	ticker := time.NewTicker(connectionStatsLogInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			stats := s.rateLimiter.ConnectionStats()
+			slog.Info(
+				"relay connection stats",
+				"activeConnections", stats.ActiveConnections,
+				"activeClientIPs", stats.ActiveClientIPs,
+				"maxConnectionsPerIP", stats.MaxConnectionsPerIP,
+				"activeGroups", s.manager.Count(),
+			)
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

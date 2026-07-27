@@ -77,3 +77,47 @@ func TestRateLimiter_DifferentIPs_Independent(t *testing.T) {
 		t.Fatal("second IP should be allowed (different IP, independent limit)")
 	}
 }
+
+func TestDefaultPerIPConnectionLimit(t *testing.T) {
+	rl := NewRateLimiter(defaultMaxPerIP, defaultMaxRooms)
+	for i := 0; i < 20; i++ {
+		if !rl.AllowConnection("192.0.2.1") {
+			t.Fatalf("connection %d should be allowed", i+1)
+		}
+	}
+	if rl.AllowConnection("192.0.2.1") {
+		t.Fatal("connection 21 should be denied")
+	}
+}
+
+func TestRateLimiter_ConnectionStats(t *testing.T) {
+	rl := NewRateLimiter(2, 100)
+	for i := 0; i < 2; i++ {
+		if !rl.AllowConnection("192.0.2.1") {
+			t.Fatalf("connection %d for first IP should be allowed", i+1)
+		}
+	}
+	if !rl.AllowConnection("198.51.100.1") {
+		t.Fatal("connection for second IP should be allowed")
+	}
+	if rl.AllowConnection("192.0.2.1") {
+		t.Fatal("connection over the limit should be denied")
+	}
+
+	want := ConnectionStats{ActiveConnections: 3, ActiveClientIPs: 2, MaxConnectionsPerIP: 2}
+	if got := rl.ConnectionStats(); got != want {
+		t.Fatalf("ConnectionStats() = %+v, want %+v", got, want)
+	}
+
+	rl.ReleaseConnection("192.0.2.1")
+	want = ConnectionStats{ActiveConnections: 2, ActiveClientIPs: 2, MaxConnectionsPerIP: 1}
+	if got := rl.ConnectionStats(); got != want {
+		t.Fatalf("ConnectionStats() after first release = %+v, want %+v", got, want)
+	}
+
+	rl.ReleaseConnection("198.51.100.1")
+	want = ConnectionStats{ActiveConnections: 1, ActiveClientIPs: 1, MaxConnectionsPerIP: 1}
+	if got := rl.ConnectionStats(); got != want {
+		t.Fatalf("ConnectionStats() after second release = %+v, want %+v", got, want)
+	}
+}
