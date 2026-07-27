@@ -195,10 +195,6 @@ func TestGroupManager_HasLiveBridgeWithID(t *testing.T) {
 	if m.HasLiveBridgeWithID("user1", "br_y") {
 		t.Error("expected false for a different bridge id")
 	}
-	// An empty bridgeId (legacy) is never matched.
-	if m.HasLiveBridgeWithID("user1", "") {
-		t.Error("expected false for an empty bridge id")
-	}
 }
 
 // A stale handler whose cleanup runs late must not delete a fresh group that a

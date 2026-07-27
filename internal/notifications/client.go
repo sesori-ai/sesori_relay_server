@@ -23,7 +23,7 @@ var ErrBridgeNotFound = errors.New("bridge not found")
 
 type BridgeStatusPayload struct {
 	UserID    string `json:"userId"`
-	BridgeID  string `json:"bridgeId,omitempty"`
+	BridgeID  string `json:"bridgeId"`
 	Status    string `json:"status"`
 	Timestamp string `json:"timestamp"`
 }
