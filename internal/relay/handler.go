@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -18,10 +20,24 @@ import (
 )
 
 const (
-	maxMessageSize      = 64 * 1024 * 1024 // 64 MiB — session data can be large
-	maxPhonesPerAccount = 5
-	pingInterval        = 30 * time.Second
+	maxMessageSize       = 64 * 1024 * 1024 // 64 MiB — session data can be large
+	maxPhonesPerAccount  = 5
+	pingInterval         = 30 * time.Second
+	cfConnectingIPHeader = "CF-Connecting-IP"
 )
+
+type clientIPSource string
+
+const (
+	clientIPSourceRemoteAddr     clientIPSource = "remote-addr"
+	clientIPSourceCFConnectingIP clientIPSource = "cf-connecting-ip"
+)
+
+type clientIPInfo struct {
+	address     string
+	peerAddress string
+	source      clientIPSource
+}
 
 var bridgeIDRegexp = regexp.MustCompile(`^br_[A-Za-z0-9_-]{8,32}$`)
 
@@ -30,16 +46,56 @@ var (
 	bridgeDisconnectedJSON, _ = json.Marshal(protocol.BridgeDisconnectedMessage{Type: protocol.TypeBridgeDisconnected})
 )
 
-func getClientIP(r *http.Request) string {
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+func resolveClientIP(r *http.Request, trustCFConnectingIP bool) clientIPInfo {
+	peerAddress := remoteIPAddress(r.RemoteAddr)
+	if trustCFConnectingIP {
+		values := r.Header.Values(cfConnectingIPHeader)
+		if len(values) == 1 {
+			if address, ok := canonicalIPAddress(values[0]); ok {
+				return clientIPInfo{
+					address:     address,
+					peerAddress: peerAddress,
+					source:      clientIPSourceCFConnectingIP,
+				}
+			}
+		}
 	}
-	return ip
+
+	return clientIPInfo{
+		address:     peerAddress,
+		peerAddress: peerAddress,
+		source:      clientIPSourceRemoteAddr,
+	}
+}
+
+func remoteIPAddress(remoteAddr string) string {
+	value := strings.TrimSpace(remoteAddr)
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	if address, ok := canonicalIPAddress(value); ok {
+		return address
+	}
+	return value
+}
+
+func canonicalIPAddress(value string) (string, bool) {
+	address, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil {
+		return "", false
+	}
+	return address.Unmap().String(), true
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	ip := getClientIP(r)
+	clientIP := resolveClientIP(r, s.trustCFConnectingIP)
+	ip := clientIP.address
+	slog.Debug(
+		"websocket client IP resolved",
+		"clientIP", clientIP.address,
+		"peerIP", clientIP.peerAddress,
+		"source", string(clientIP.source),
+	)
 	if !s.rateLimiter.AllowConnection(ip) {
 		http.Error(w, "too many connections", http.StatusTooManyRequests)
 		return

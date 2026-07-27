@@ -20,7 +20,7 @@ Phone ←──(encrypted)──→ Relay Server ←──(encrypted)──→ B
 ```
 
 - **Account groups**: Connections are grouped by `userId` from the JWT. Each group holds 1 bridge + up to 5 phones.
-- **Rate limiting**: Max 10 connections per IP, max 10,000 active groups globally.
+- **Rate limiting**: Max 20 connections per resolved client IP, max 10,000 active groups globally.
 - **No storage**: The relay holds no state beyond active WebSocket connections. Nothing is persisted.
 
 ## Running locally
@@ -42,6 +42,7 @@ The server listens on `:8080` by default.
 | `--addr` | `RELAY_ADDR` | `:8080` | Listen address |
 | `--log-level` | `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
 | `--require-bridge-id` | `RELAY_REQUIRE_BRIDGE_ID` | `false` | Require `bridgeId` field on bridge auth messages. Default `false` accepts legacy bridges (no `bridgeId`) and logs a warning. Set `true` to enforce after the bridge fleet has rolled over. |
+| `--trust-cf-connecting-ip` | `RELAY_TRUST_CF_CONNECTING_IP` | `false` | Use Cloudflare's validated `CF-Connecting-IP` value for per-IP limits. Enable only when every request reaches the relay through Cloudflare and direct origin access is blocked. |
 
 ## Endpoints
 
@@ -75,7 +76,7 @@ The GitHub Actions workflows run on every push and PR:
 
 - The relay **cannot decrypt** any traffic. All data between phone and bridge is encrypted with XChaCha20-Poly1305 using keys derived from an X25519 key exchange that happens directly between the two peers.
 - JWT authentication is required before any data is forwarded. Tokens must be RS256-signed with valid `userId`, `tokenType`, `aud`, `iss`, and `exp` claims.
-- Rate limiting prevents abuse: max connections per IP, max groups globally, and at most 5 phones per account group.
+- Rate limiting prevents abuse: max 20 connections per resolved client IP, max groups globally, and at most 5 phones per account group.
 - The server runs as a non-root user in Docker.
 
 ## Protocol

@@ -7,3 +7,4 @@ vendor/
 *.gitkeep
 .env
 .sisyphus/
+.DS_Store

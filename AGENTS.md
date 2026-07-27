@@ -19,7 +19,7 @@ internal/
     ├── handler.go             WebSocket upgrade + auth handshake + message routing
     ├── server.go              HTTP server, /health endpoint, connection lifecycle
     ├── account_group.go       Per-userId group: 1 bridge + up to 5 phones, connId assignment
-    └── rate_limiter.go        Per-IP connection limiting (max 10), global group cap (10,000)
+    └── rate_limiter.go        Per-IP connection limiting (max 20), global group cap (10,000)
 ```
 
 ## WHERE TO LOOK
@@ -29,7 +29,7 @@ internal/
 | Change auth/JWT | `internal/auth/` | RS256 verification, claims in authenticator.go |
 | Modify protocol messages | `internal/protocol/messages.go` | JSON control messages (bridge/phone connected/disconnected) |
 | Change binary framing | `internal/protocol/framing.go` | 2-byte connId prefix on binary frames |
-| Adjust rate limits | `internal/relay/rate_limiter.go` | Per-IP (10) and global group (10,000) caps |
+| Adjust rate limits | `internal/relay/rate_limiter.go` | Per-IP (20) and global group (10,000) caps |
 | Add endpoints | `internal/relay/server.go` | HTTP mux, currently /health and /ws |
 | Modify group behavior | `internal/relay/account_group.go` | Max 5 phones per account, connId=0 broadcast |
 

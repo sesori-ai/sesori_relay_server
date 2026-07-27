@@ -113,6 +113,7 @@ For self-hosted deployments on a VPS (AWS EC2, DigitalOcean, Linode, etc.).
 ### Environment Variables
 
 - `LOG_LEVEL` — Logging level: `debug`, `info`, `warn`, `error` (default: `info`)
+- `RELAY_TRUST_CF_CONNECTING_IP` — Set to `true` only when every request passes through Cloudflare and direct access to the origin is blocked. Uses Cloudflare's single-IP `CF-Connecting-IP` header for per-client connection limits instead of the ingress proxy address.
 
 ### Command-Line Flags
 
@@ -120,6 +121,7 @@ The relay server accepts the following flags:
 
 - `--addr` — Listen address (default: `:8080`)
 - `--log-level` — Logging level (overrides `LOG_LEVEL` env var)
+- `--trust-cf-connecting-ip` — Trust `CF-Connecting-IP` for per-client connection limits. This is the flag equivalent of `RELAY_TRUST_CF_CONNECTING_IP=true`.
 
 ### Example: Custom Port
 
@@ -138,6 +140,27 @@ curl http://localhost:8080/health
 ```
 
 ### Logs
+
+At `info` level, the relay logs aggregate connection statistics every 10
+minutes: active WebSockets, distinct resolved client IPs, the busiest IP
+bucket, cumulative rejected connection attempts, and active account groups.
+
+To verify client-IP extraction after a Cloudflare deployment:
+
+1. Set `RELAY_TRUST_CF_CONNECTING_IP=true` and temporarily set
+   `LOG_LEVEL=debug`.
+2. Connect from two different public networks, such as Wi-Fi and phone
+   cellular data.
+3. Inspect `websocket client IP resolved` records. `source` must be
+   `cf-connecting-ip`; `clientIP` should match each network's public address
+   and vary between the two networks, while `peerIP` may repeat because it is
+   the ingress proxy.
+4. Confirm the startup record contains `trust-cf-connecting-ip=true` and the
+   10-minute `relay connection stats` records show a plausible
+   `activeClientIPs` count rather than one shared proxy bucket. The
+   `rejectedConnections` field is cumulative since process start.
+5. Restore `LOG_LEVEL=info` after verification because debug records contain
+   client IP addresses.
 
 **Docker Compose:**
 ```bash

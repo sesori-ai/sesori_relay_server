@@ -1,44 +1,76 @@
 package relay
 
-import (
-	"sync"
-	"sync/atomic"
-)
+import "sync"
 
 const (
-	defaultMaxPerIP = 10
+	defaultMaxPerIP = 20
 	defaultMaxRooms = 10000
 )
 
+type ConnectionStats struct {
+	ActiveConnections   int64
+	ActiveClientIPs     int
+	MaxConnectionsPerIP int64
+	RejectedConnections int64
+}
+
 type RateLimiter struct {
-	maxPerIP int
-	maxRooms int
-	counts   sync.Map
+	maxPerIP            int
+	maxRooms            int
+	mu                  sync.Mutex
+	counts              map[string]int
+	rejectedConnections int64
 }
 
 func NewRateLimiter(maxPerIP, maxRooms int) *RateLimiter {
 	return &RateLimiter{
 		maxPerIP: maxPerIP,
 		maxRooms: maxRooms,
+		counts:   make(map[string]int),
 	}
 }
 
 func (rl *RateLimiter) AllowConnection(ip string) bool {
-	actual, _ := rl.counts.LoadOrStore(ip, new(int64))
-	counter := actual.(*int64)
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
 
-	newVal := atomic.AddInt64(counter, 1)
-	if int(newVal) > rl.maxPerIP {
-		atomic.AddInt64(counter, -1)
+	count := rl.counts[ip]
+	if count >= rl.maxPerIP {
+		rl.rejectedConnections++
 		return false
 	}
+	rl.counts[ip] = count + 1
 	return true
 }
 
 func (rl *RateLimiter) ReleaseConnection(ip string) {
-	if actual, ok := rl.counts.Load(ip); ok {
-		atomic.AddInt64(actual.(*int64), -1)
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	count, ok := rl.counts[ip]
+	if !ok {
+		return
 	}
+	if count <= 1 {
+		delete(rl.counts, ip)
+		return
+	}
+	rl.counts[ip] = count - 1
+}
+
+func (rl *RateLimiter) ConnectionStats() ConnectionStats {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	stats := ConnectionStats{RejectedConnections: rl.rejectedConnections}
+	for _, count := range rl.counts {
+		stats.ActiveConnections += int64(count)
+		stats.ActiveClientIPs++
+		if int64(count) > stats.MaxConnectionsPerIP {
+			stats.MaxConnectionsPerIP = int64(count)
+		}
+	}
+	return stats
 }
 
 func (rl *RateLimiter) AllowGroup(currentGroupCount int) bool {

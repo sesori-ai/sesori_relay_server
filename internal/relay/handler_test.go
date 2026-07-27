@@ -31,6 +31,7 @@ type testEnv struct {
 type testEnvOpts struct {
 	requireBridgeID     bool
 	notificationsClient *notifications.Client
+	trustCFConnectingIP bool
 }
 
 func newTestEnv(t *testing.T, opts ...testEnvOpts) *testEnv {
@@ -63,7 +64,7 @@ func newTestEnv(t *testing.T, opts ...testEnvOpts) *testEnv {
 	}
 
 	jwtAuth := auth.NewJWTAuthenticator(ks)
-	relayServer := NewServer(":0", jwtAuth, o.notificationsClient, o.requireBridgeID)
+	relayServer := NewServer(":0", jwtAuth, o.notificationsClient, o.requireBridgeID, o.trustCFConnectingIP)
 
 	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		relayServer.handleWebSocket(w, r)
@@ -74,6 +75,120 @@ func newTestEnv(t *testing.T, opts ...testEnvOpts) *testEnv {
 		relay:      relayServer,
 		httpServer: httpSrv,
 		privateKey: privateKey,
+	}
+}
+
+func TestResolveClientIP(t *testing.T) {
+	tests := []struct {
+		name                string
+		remoteAddr          string
+		cfConnectingIP      []string
+		trustCFConnectingIP bool
+		wantAddress         string
+		wantPeerAddress     string
+		wantSource          clientIPSource
+	}{
+		{
+			name:                "ignores spoofed header when trust is disabled",
+			remoteAddr:          "10.0.0.7:4312",
+			cfConnectingIP:      []string{"198.51.100.44"},
+			trustCFConnectingIP: false,
+			wantAddress:         "10.0.0.7",
+			wantPeerAddress:     "10.0.0.7",
+			wantSource:          clientIPSourceRemoteAddr,
+		},
+		{
+			name:                "uses trusted Cloudflare IPv4 address",
+			remoteAddr:          "10.0.0.7:4312",
+			cfConnectingIP:      []string{"198.51.100.44"},
+			trustCFConnectingIP: true,
+			wantAddress:         "198.51.100.44",
+			wantPeerAddress:     "10.0.0.7",
+			wantSource:          clientIPSourceCFConnectingIP,
+		},
+		{
+			name:                "canonicalizes trusted Cloudflare IPv6 address",
+			remoteAddr:          "[2001:db8::2]:4312",
+			cfConnectingIP:      []string{"2001:0db8:0:0::7"},
+			trustCFConnectingIP: true,
+			wantAddress:         "2001:db8::7",
+			wantPeerAddress:     "2001:db8::2",
+			wantSource:          clientIPSourceCFConnectingIP,
+		},
+		{
+			name:                "rejects malformed trusted header",
+			remoteAddr:          "10.0.0.7:4312",
+			cfConnectingIP:      []string{"not-an-ip"},
+			trustCFConnectingIP: true,
+			wantAddress:         "10.0.0.7",
+			wantPeerAddress:     "10.0.0.7",
+			wantSource:          clientIPSourceRemoteAddr,
+		},
+		{
+			name:                "rejects comma-separated trusted header",
+			remoteAddr:          "10.0.0.7:4312",
+			cfConnectingIP:      []string{"198.51.100.44, 203.0.113.9"},
+			trustCFConnectingIP: true,
+			wantAddress:         "10.0.0.7",
+			wantPeerAddress:     "10.0.0.7",
+			wantSource:          clientIPSourceRemoteAddr,
+		},
+		{
+			name:                "rejects duplicate trusted headers",
+			remoteAddr:          "10.0.0.7:4312",
+			cfConnectingIP:      []string{"198.51.100.44", "203.0.113.9"},
+			trustCFConnectingIP: true,
+			wantAddress:         "10.0.0.7",
+			wantPeerAddress:     "10.0.0.7",
+			wantSource:          clientIPSourceRemoteAddr,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "http://relay.test/ws", nil)
+			request.RemoteAddr = tt.remoteAddr
+			for _, value := range tt.cfConnectingIP {
+				request.Header.Add(cfConnectingIPHeader, value)
+			}
+
+			got := resolveClientIP(request, tt.trustCFConnectingIP)
+			if got.address != tt.wantAddress {
+				t.Errorf("address = %q, want %q", got.address, tt.wantAddress)
+			}
+			if got.peerAddress != tt.wantPeerAddress {
+				t.Errorf("peerAddress = %q, want %q", got.peerAddress, tt.wantPeerAddress)
+			}
+			if got.source != tt.wantSource {
+				t.Errorf("source = %q, want %q", got.source, tt.wantSource)
+			}
+		})
+	}
+}
+
+func TestHandleWebSocketRateLimitsByTrustedCloudflareIP(t *testing.T) {
+	server := &Server{
+		manager:             NewGroupManager(),
+		rateLimiter:         NewRateLimiter(1, 100),
+		trustCFConnectingIP: true,
+	}
+	const clientIP = "198.51.100.44"
+	if !server.rateLimiter.AllowConnection(clientIP) {
+		t.Fatal("failed to occupy the trusted client IP bucket")
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://relay.test/ws", nil)
+	request.RemoteAddr = "10.0.0.7:4312"
+	request.Header.Set(cfConnectingIPHeader, clientIP)
+	response := httptest.NewRecorder()
+
+	server.handleWebSocket(response, request)
+
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusTooManyRequests)
+	}
+	if got := server.rateLimiter.ConnectionStats().RejectedConnections; got != 1 {
+		t.Fatalf("rejected connections = %d, want 1", got)
 	}
 }
 
