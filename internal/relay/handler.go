@@ -124,25 +124,23 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := authResult.UserID
 
+	if authMsg.Role == protocol.RoleBridge {
+		if authMsg.BridgeID == "" {
+			slog.Debug("bridge connection rejected: bridgeId required", "userId", userID)
+			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridgeId required")
+			return
+		}
+		if !bridgeIDRegexp.MatchString(authMsg.BridgeID) {
+			slog.Debug("bridge connection rejected: invalid bridgeId format", "userId", userID, "bridgeId", authMsg.BridgeID)
+			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid bridgeId format")
+			return
+		}
+	}
+
 	group := s.manager.GetOrCreateGroup(userID)
 
 	slog.Debug("connection joined group", "userID", userID, "role", authMsg.Role)
 	if authMsg.Role == protocol.RoleBridge {
-		if authMsg.BridgeID != "" && !bridgeIDRegexp.MatchString(authMsg.BridgeID) {
-			s.manager.RemoveGroupIfEmpty(userID, group)
-			slog.Warn("bridge connection rejected: invalid bridgeId format", "userId", userID, "bridgeId", authMsg.BridgeID)
-			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid bridgeId format")
-			return
-		}
-		if s.requireBridgeID && authMsg.BridgeID == "" {
-			s.manager.RemoveGroupIfEmpty(userID, group)
-			slog.Warn("bridge connection rejected: bridgeId required", "userId", userID)
-			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridgeId required")
-			return
-		}
-		if authMsg.BridgeID == "" {
-			slog.Warn("legacy bridge without bridgeId; set RELAY_REQUIRE_BRIDGE_ID=true to enforce", "userId", userID)
-		}
 		handleBridge(r.Context(), conn, group, s.manager, userID, authMsg.BridgeID, s.notifications)
 		return
 	}
@@ -270,7 +268,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 			if err == nil {
 				return
 			}
-			if bridgeID != "" && errors.Is(err, notifications.ErrBridgeNotFound) {
+			if errors.Is(err, notifications.ErrBridgeNotFound) {
 				// The auth server explicitly reported this bridgeId as unknown,
 				// revoked, or owned by another user. Close exactly this
 				// connection; unblocking its read loop runs the deferred
@@ -298,7 +296,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 			group.Bridge = nil
 		}
 		group.mu.Unlock()
-		shouldNotifyDisconnected := isCurrent || (bridgeID != "" && bridgeID != currentBridgeID)
+		shouldNotifyDisconnected := isCurrent || bridgeID != currentBridgeID
 
 		// Suppress the disconnect notification if this bridgeId is already live
 		// again on the user's current group: a displaced handler whose teardown

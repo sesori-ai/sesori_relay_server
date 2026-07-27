@@ -43,7 +43,7 @@ type RoleAuthMessage struct {
 	Type     string `json:"type"` // "auth"
 	Token    string `json:"token"`
 	Role     string `json:"role"`               // "bridge" or "phone"
-	BridgeID string `json:"bridgeId,omitempty"` // optional; bridge role only. Format: ^br_[A-Za-z0-9_-]{8,32}$. Required when the relay runs with --require-bridge-id.
+	BridgeID string `json:"bridgeId,omitempty"` // required for bridges, ignored for phones. Format: ^br_[A-Za-z0-9_-]{8,32}$.
 }
 
 // PhoneConnectedMessage is sent by relay to bridge when a phone joins.

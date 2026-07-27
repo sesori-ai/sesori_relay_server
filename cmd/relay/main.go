@@ -23,7 +23,6 @@ func main() {
 	logLevel := flag.String("log-level", "info", "log level (debug, info, warn, error)")
 	authBackendURL := flag.String("auth-backend-url", "", "auth backend base URL (e.g. https://auth.example.com); auth is disabled when empty")
 	relayWebhookSecret := flag.String("relay-webhook-secret", "", "shared secret for auth server webhook")
-	requireBridgeID := flag.Bool("require-bridge-id", false, "require bridgeId field on bridge auth messages (transition gate; set true once the bridge fleet has rolled over)")
 	trustCFConnectingIP := flag.Bool(
 		"trust-cf-connecting-ip",
 		false,
@@ -41,16 +40,6 @@ func main() {
 	if !flagWasSet("log-level") {
 		if value := os.Getenv("LOG_LEVEL"); value != "" {
 			*logLevel = value
-		}
-	}
-	if !flagWasSet("require-bridge-id") {
-		v, ok, err := envBool("RELAY_REQUIRE_BRIDGE_ID")
-		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "invalid RELAY_REQUIRE_BRIDGE_ID: %v\n", err)
-			os.Exit(1)
-		}
-		if ok {
-			*requireBridgeID = v
 		}
 	}
 	if !flagWasSet("trust-cf-connecting-ip") {
@@ -80,7 +69,6 @@ func main() {
 		"starting relay server",
 		"addr", *addr,
 		"log-level", *logLevel,
-		"require-bridge-id", *requireBridgeID,
 		"trust-cf-connecting-ip", *trustCFConnectingIP,
 	)
 
@@ -103,7 +91,7 @@ func main() {
 		slog.Info("push notifications disabled (no webhook secret)")
 	}
 
-	server := relay.NewServer(*addr, authenticator, notifs, *requireBridgeID, *trustCFConnectingIP)
+	server := relay.NewServer(*addr, authenticator, notifs, *trustCFConnectingIP)
 
 	if err := server.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server error", "err", err)

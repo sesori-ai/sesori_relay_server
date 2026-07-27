@@ -22,21 +22,17 @@ type Server struct {
 	httpServer          *http.Server
 	jwtAuth             *auth.JWTAuthenticator
 	notifications       *notifications.Client
-	requireBridgeID     bool
 	trustCFConnectingIP bool
 }
 
 // NewServer creates a relay server. Pass a nil authenticator to disable auth.
-// requireBridgeID enforces that every bridge connection sends a bridgeId in
-// its auth message; when false, bridges without bridgeId are accepted (legacy
-// path) and no bridgeId is forwarded to the auth server.
 // trustCFConnectingIP uses Cloudflare's visitor IP header for rate limiting and
 // must only be enabled when direct access to the origin is blocked.
 func NewServer(
 	addr string,
 	jwtAuth *auth.JWTAuthenticator,
 	notifs *notifications.Client,
-	requireBridgeID, trustCFConnectingIP bool,
+	trustCFConnectingIP bool,
 ) *Server {
 	return &Server{
 		addr:                addr,
@@ -44,7 +40,6 @@ func NewServer(
 		rateLimiter:         NewRateLimiter(defaultMaxPerIP, defaultMaxRooms),
 		jwtAuth:             jwtAuth,
 		notifications:       notifs,
-		requireBridgeID:     requireBridgeID,
 		trustCFConnectingIP: trustCFConnectingIP,
 	}
 }

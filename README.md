@@ -6,7 +6,7 @@ The relay routes traffic by account — connections are grouped by the `userId` 
 
 ## How it works
 
-1. Bridge CLI connects to `/ws` and sends an auth message with a signed JWT and role `"bridge"`
+1. Bridge CLI connects to `/ws` and sends an auth message with a signed JWT, role `"bridge"`, and its `bridgeId`
 2. Phone connects to `/ws` and sends an auth message with a signed JWT and role `"phone"`
 3. Relay extracts `userId` from each JWT and groups connections by account — 1 bridge + up to 5 phones per account
 4. Binary frames from phone → relay → bridge carry a 2-byte `connId` prefix so the bridge can address replies back to the correct phone
@@ -41,7 +41,6 @@ The server listens on `:8080` by default.
 |------|---------|---------|-------------|
 | `--addr` | `RELAY_ADDR` | `:8080` | Listen address |
 | `--log-level` | `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
-| `--require-bridge-id` | `RELAY_REQUIRE_BRIDGE_ID` | `false` | Require `bridgeId` field on bridge auth messages. Default `false` accepts legacy bridges (no `bridgeId`) and logs a warning. Set `true` to enforce after the bridge fleet has rolled over. |
 | `--trust-cf-connecting-ip` | `RELAY_TRUST_CF_CONNECTING_IP` | `false` | Use Cloudflare's validated `CF-Connecting-IP` value for per-IP limits. Enable only when every request reaches the relay through Cloudflare and direct origin access is blocked. |
 
 ## Endpoints
@@ -92,10 +91,9 @@ Every client sends this as the first WebSocket message (plaintext JSON):
 Both roles authenticate with the user's **access token** (`tokenType:
 "access"`, `aud: "mobile"`); no other token type is accepted.
 
-The `bridgeId` field is optional for `role: "phone"` (ignored) and is
-optional for `role: "bridge"` unless the relay was started with
-`--require-bridge-id=true` (or `RELAY_REQUIRE_BRIDGE_ID=true`). Format:
-`^br_[A-Za-z0-9_-]{8,32}$`. The relay does not validate the value
+The `bridgeId` field is required for `role: "bridge"` and ignored for
+`role: "phone"`. Its format is `^br_[A-Za-z0-9_-]{8,32}$`. The relay
+does not validate the value
 against any database at handshake time; it forwards it to the auth
 server in the bridge-status report. If the auth server answers that
 report with an explicit HTTP 404 (bridgeId unknown, revoked, or owned

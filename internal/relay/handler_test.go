@@ -29,7 +29,6 @@ type testEnv struct {
 }
 
 type testEnvOpts struct {
-	requireBridgeID     bool
 	notificationsClient *notifications.Client
 	trustCFConnectingIP bool
 }
@@ -64,7 +63,7 @@ func newTestEnv(t *testing.T, opts ...testEnvOpts) *testEnv {
 	}
 
 	jwtAuth := auth.NewJWTAuthenticator(ks)
-	relayServer := NewServer(":0", jwtAuth, o.notificationsClient, o.requireBridgeID, o.trustCFConnectingIP)
+	relayServer := NewServer(":0", jwtAuth, o.notificationsClient, o.trustCFConnectingIP)
 
 	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		relayServer.handleWebSocket(w, r)
@@ -772,8 +771,8 @@ func TestHandler_BridgeID_StoredOnConnection(t *testing.T) {
 	}
 }
 
-func TestHandler_BridgeAuth_RequiresBridgeID_PostTransition(t *testing.T) {
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: true})
+func TestHandler_BridgeAuth_RequiresBridgeID(t *testing.T) {
+	env := newTestEnv(t)
 
 	bridge := env.connectBridgeNoID(t, "user1")
 	expectClose(t, bridge, websocket.StatusCode(protocol.CloseAuthFailure))
@@ -783,8 +782,8 @@ func TestHandler_BridgeAuth_RequiresBridgeID_PostTransition(t *testing.T) {
 	}
 }
 
-func TestHandler_BridgeAuth_AcceptsBridgeID_PostTransition(t *testing.T) {
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: true})
+func TestHandler_BridgeAuth_AcceptsBridgeID(t *testing.T) {
+	env := newTestEnv(t)
 
 	bridge := env.connectBridgeWithID(t, "user1", "br_abc12345")
 	defer bridge.CloseNow()
@@ -795,7 +794,7 @@ func TestHandler_BridgeAuth_AcceptsBridgeID_PostTransition(t *testing.T) {
 }
 
 func TestHandler_BridgeAuth_AcceptsAccessTokenWithBridgeID(t *testing.T) {
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
+	env := newTestEnv(t)
 	ctx := context.Background()
 
 	conn, err := env.dial(ctx)
@@ -815,7 +814,7 @@ func TestHandler_BridgeAuth_AcceptsAccessTokenWithBridgeID(t *testing.T) {
 }
 
 func TestHandler_BridgeAuth_RejectsBridgeTypedToken(t *testing.T) {
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: true})
+	env := newTestEnv(t)
 	ctx := context.Background()
 
 	conn, err := env.dial(ctx)
@@ -831,7 +830,7 @@ func TestHandler_BridgeAuth_RejectsBridgeTypedToken(t *testing.T) {
 }
 
 func TestHandler_BridgeAuth_RejectsBridgeTokenWithoutBridgeID(t *testing.T) {
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
+	env := newTestEnv(t)
 	ctx := context.Background()
 
 	conn, err := env.dial(ctx)
@@ -846,33 +845,22 @@ func TestHandler_BridgeAuth_RejectsBridgeTokenWithoutBridgeID(t *testing.T) {
 	expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
 }
 
-func TestHandler_BridgeAuth_LegacyAllowedInTransition(t *testing.T) {
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
-
-	bridge := env.connectBridgeNoID(t, "user1")
-	defer bridge.CloseNow()
-
-	if env.relay.manager.Count() != 1 {
-		t.Errorf("expected 1 group (legacy accepted in transition), got %d", env.relay.manager.Count())
-	}
-}
-
 func TestHandler_BridgeAuth_InvalidBridgeID_Format(t *testing.T) {
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: false})
+	env := newTestEnv(t)
 
 	bridge := env.connectBridgeWithID(t, "user1", "not-a-valid-bridge-id")
 	expectClose(t, bridge, websocket.StatusCode(protocol.CloseAuthFailure))
 }
 
-func TestHandler_BridgeAuth_InvalidBridgeID_FormatPostTransition(t *testing.T) {
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: true})
+func TestHandler_BridgeAuth_RejectsShortBridgeID(t *testing.T) {
+	env := newTestEnv(t)
 
 	bridge := env.connectBridgeWithID(t, "user1", "br_short")
 	expectClose(t, bridge, websocket.StatusCode(protocol.CloseAuthFailure))
 }
 
 func TestHandler_PhoneAuth_IgnoresStrayBridgeID(t *testing.T) {
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: true})
+	env := newTestEnv(t)
 
 	ctx := context.Background()
 	conn, err := env.dial(ctx)
@@ -944,7 +932,7 @@ func TestHandler_NotificationsClient_ForwardsBridgeID(t *testing.T) {
 	t.Cleanup(notifServer.Close)
 
 	notif := notifications.NewClient(notifServer.URL, secret)
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+	env := newTestEnv(t, testEnvOpts{notificationsClient: notif})
 
 	conn := env.connectBridgeWithID(t, "user1", bridgeID)
 
@@ -1017,7 +1005,7 @@ func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing
 	t.Cleanup(notifServer.Close)
 
 	notif := notifications.NewClient(notifServer.URL, secret)
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+	env := newTestEnv(t, testEnvOpts{notificationsClient: notif})
 	oldBridge := env.connectBridgeWithID(t, "user1", "br_oldBridge01")
 
 	first := readCaptured("old bridge connected")
@@ -1082,7 +1070,7 @@ func TestHandler_BridgeRevoked_ConnectReport404_ClosesWith4006(t *testing.T) {
 	t.Cleanup(notifServer.Close)
 
 	notif := notifications.NewClient(notifServer.URL, secret)
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+	env := newTestEnv(t, testEnvOpts{notificationsClient: notif})
 
 	conn := env.connectBridgeWithID(t, "user1", "br_revoked001")
 	defer conn.CloseNow()
@@ -1105,7 +1093,7 @@ func TestHandler_BridgeRevoked_ConnectReport5xx_FailOpen(t *testing.T) {
 	t.Cleanup(notifServer.Close)
 
 	notif := notifications.NewClient(notifServer.URL, "test-relay-secret")
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+	env := newTestEnv(t, testEnvOpts{notificationsClient: notif})
 
 	conn := env.connectBridgeWithID(t, "user1", "br_abc12345")
 	defer conn.CloseNow()
@@ -1126,7 +1114,7 @@ func TestHandler_BridgeRevoked_ConnectReportTransportError_FailOpen(t *testing.T
 	notifServer.Close()
 
 	notif := notifications.NewClient(unreachableURL, "test-relay-secret")
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: true, notificationsClient: notif})
+	env := newTestEnv(t, testEnvOpts{notificationsClient: notif})
 
 	conn := env.connectBridgeWithID(t, "user1", "br_abc12345")
 	defer conn.CloseNow()
@@ -1135,26 +1123,6 @@ func TestHandler_BridgeRevoked_ConnectReportTransportError_FailOpen(t *testing.T
 
 	if env.relay.manager.Count() != 1 {
 		t.Fatalf("expected bridge to stay connected on transport error, got %d groups", env.relay.manager.Count())
-	}
-	expectOpen(t, conn, 300*time.Millisecond)
-}
-
-func TestHandler_BridgeRevoked_LegacyNoBridgeID_404_FailOpen(t *testing.T) {
-	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(notifServer.Close)
-
-	notif := notifications.NewClient(notifServer.URL, "test-relay-secret")
-	env := newTestEnv(t, testEnvOpts{requireBridgeID: false, notificationsClient: notif})
-
-	conn := env.connectBridgeNoID(t, "user1")
-	defer conn.CloseNow()
-
-	time.Sleep(150 * time.Millisecond) // let the async status report complete
-
-	if env.relay.manager.Count() != 1 {
-		t.Fatalf("expected legacy bridge to stay connected, got %d groups", env.relay.manager.Count())
 	}
 	expectOpen(t, conn, 300*time.Millisecond)
 }
