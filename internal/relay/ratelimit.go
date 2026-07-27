@@ -1,9 +1,6 @@
 package relay
 
-import (
-	"sync"
-	"sync/atomic"
-)
+import "sync"
 
 const (
 	defaultMaxPerIP = 20
@@ -14,54 +11,65 @@ type ConnectionStats struct {
 	ActiveConnections   int64
 	ActiveClientIPs     int
 	MaxConnectionsPerIP int64
+	RejectedConnections int64
 }
 
 type RateLimiter struct {
-	maxPerIP int
-	maxRooms int
-	counts   sync.Map
+	maxPerIP            int
+	maxRooms            int
+	mu                  sync.Mutex
+	counts              map[string]int
+	rejectedConnections int64
 }
 
 func NewRateLimiter(maxPerIP, maxRooms int) *RateLimiter {
 	return &RateLimiter{
 		maxPerIP: maxPerIP,
 		maxRooms: maxRooms,
+		counts:   make(map[string]int),
 	}
 }
 
 func (rl *RateLimiter) AllowConnection(ip string) bool {
-	actual, _ := rl.counts.LoadOrStore(ip, new(int64))
-	counter := actual.(*int64)
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
 
-	newVal := atomic.AddInt64(counter, 1)
-	if int(newVal) > rl.maxPerIP {
-		atomic.AddInt64(counter, -1)
+	count := rl.counts[ip]
+	if count >= rl.maxPerIP {
+		rl.rejectedConnections++
 		return false
 	}
+	rl.counts[ip] = count + 1
 	return true
 }
 
 func (rl *RateLimiter) ReleaseConnection(ip string) {
-	if actual, ok := rl.counts.Load(ip); ok {
-		atomic.AddInt64(actual.(*int64), -1)
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	count, ok := rl.counts[ip]
+	if !ok {
+		return
 	}
+	if count <= 1 {
+		delete(rl.counts, ip)
+		return
+	}
+	rl.counts[ip] = count - 1
 }
 
 func (rl *RateLimiter) ConnectionStats() ConnectionStats {
-	var stats ConnectionStats
-	rl.counts.Range(func(_, value any) bool {
-		count := atomic.LoadInt64(value.(*int64))
-		if count <= 0 {
-			return true
-		}
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
 
-		stats.ActiveConnections += count
+	stats := ConnectionStats{RejectedConnections: rl.rejectedConnections}
+	for _, count := range rl.counts {
+		stats.ActiveConnections += int64(count)
 		stats.ActiveClientIPs++
-		if count > stats.MaxConnectionsPerIP {
-			stats.MaxConnectionsPerIP = count
+		if int64(count) > stats.MaxConnectionsPerIP {
+			stats.MaxConnectionsPerIP = int64(count)
 		}
-		return true
-	})
+	}
 	return stats
 }
 

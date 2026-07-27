@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -104,20 +105,83 @@ func TestRateLimiter_ConnectionStats(t *testing.T) {
 		t.Fatal("connection over the limit should be denied")
 	}
 
-	want := ConnectionStats{ActiveConnections: 3, ActiveClientIPs: 2, MaxConnectionsPerIP: 2}
+	want := ConnectionStats{
+		ActiveConnections:   3,
+		ActiveClientIPs:     2,
+		MaxConnectionsPerIP: 2,
+		RejectedConnections: 1,
+	}
 	if got := rl.ConnectionStats(); got != want {
 		t.Fatalf("ConnectionStats() = %+v, want %+v", got, want)
 	}
 
 	rl.ReleaseConnection("192.0.2.1")
-	want = ConnectionStats{ActiveConnections: 2, ActiveClientIPs: 2, MaxConnectionsPerIP: 1}
+	want = ConnectionStats{
+		ActiveConnections:   2,
+		ActiveClientIPs:     2,
+		MaxConnectionsPerIP: 1,
+		RejectedConnections: 1,
+	}
 	if got := rl.ConnectionStats(); got != want {
 		t.Fatalf("ConnectionStats() after first release = %+v, want %+v", got, want)
 	}
 
 	rl.ReleaseConnection("198.51.100.1")
-	want = ConnectionStats{ActiveConnections: 1, ActiveClientIPs: 1, MaxConnectionsPerIP: 1}
+	want = ConnectionStats{
+		ActiveConnections:   1,
+		ActiveClientIPs:     1,
+		MaxConnectionsPerIP: 1,
+		RejectedConnections: 1,
+	}
 	if got := rl.ConnectionStats(); got != want {
 		t.Fatalf("ConnectionStats() after second release = %+v, want %+v", got, want)
+	}
+}
+
+func TestRateLimiter_ReleaseConnectionEvictsInactiveIPBucket(t *testing.T) {
+	rl := NewRateLimiter(2, 100)
+	if !rl.AllowConnection("192.0.2.1") {
+		t.Fatal("connection should be allowed")
+	}
+	rl.ReleaseConnection("192.0.2.1")
+
+	if trackedIPs := len(rl.counts); trackedIPs != 0 {
+		t.Fatalf("tracked IP buckets = %d, want 0", trackedIPs)
+	}
+}
+
+func TestRateLimiter_ConcurrentReleaseAndReconnectPreservesConnection(t *testing.T) {
+	rl := NewRateLimiter(2, 100)
+	const ip = "192.0.2.1"
+	if !rl.AllowConnection(ip) {
+		t.Fatal("initial connection should be allowed")
+	}
+
+	for i := 0; i < 1000; i++ {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		allowed := make(chan bool, 1)
+		go func() {
+			defer wg.Done()
+			rl.ReleaseConnection(ip)
+		}()
+		go func() {
+			defer wg.Done()
+			allowed <- rl.AllowConnection(ip)
+		}()
+		wg.Wait()
+
+		if !<-allowed {
+			t.Fatalf("reconnect %d should be allowed", i+1)
+		}
+		want := ConnectionStats{ActiveConnections: 1, ActiveClientIPs: 1, MaxConnectionsPerIP: 1}
+		if got := rl.ConnectionStats(); got != want {
+			t.Fatalf("ConnectionStats() after reconnect %d = %+v, want %+v", i+1, got, want)
+		}
+	}
+
+	rl.ReleaseConnection(ip)
+	if trackedIPs := len(rl.counts); trackedIPs != 0 {
+		t.Fatalf("tracked IP buckets after final release = %d, want 0", trackedIPs)
 	}
 }

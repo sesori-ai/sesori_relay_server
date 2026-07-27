@@ -97,13 +97,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		"source", string(clientIP.source),
 	)
 	if !s.rateLimiter.AllowConnection(ip) {
-		slog.Warn(
-			"websocket connection rejected: per-IP limit reached",
-			"clientIP", clientIP.address,
-			"peerIP", clientIP.peerAddress,
-			"source", string(clientIP.source),
-			"limit", s.rateLimiter.maxPerIP,
-		)
 		http.Error(w, "too many connections", http.StatusTooManyRequests)
 		return
 	}

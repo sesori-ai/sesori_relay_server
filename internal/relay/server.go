@@ -91,6 +91,7 @@ func (s *Server) logConnectionStats(ctx context.Context) {
 				"activeConnections", stats.ActiveConnections,
 				"activeClientIPs", stats.ActiveClientIPs,
 				"maxConnectionsPerIP", stats.MaxConnectionsPerIP,
+				"rejectedConnections", stats.RejectedConnections,
 				"activeGroups", s.manager.Count(),
 			)
 		case <-ctx.Done():

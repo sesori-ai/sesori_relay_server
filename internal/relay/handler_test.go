@@ -187,6 +187,9 @@ func TestHandleWebSocketRateLimitsByTrustedCloudflareIP(t *testing.T) {
 	if response.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusTooManyRequests)
 	}
+	if got := server.rateLimiter.ConnectionStats().RejectedConnections; got != 1 {
+		t.Fatalf("rejected connections = %d, want 1", got)
+	}
 }
 
 func (e *testEnv) wsURL() string {

@@ -143,7 +143,7 @@ curl http://localhost:8080/health
 
 At `info` level, the relay logs aggregate connection statistics every 10
 minutes: active WebSockets, distinct resolved client IPs, the busiest IP
-bucket, and active account groups.
+bucket, cumulative rejected connection attempts, and active account groups.
 
 To verify client-IP extraction after a Cloudflare deployment:
 
@@ -157,7 +157,8 @@ To verify client-IP extraction after a Cloudflare deployment:
    the ingress proxy.
 4. Confirm the startup record contains `trust-cf-connecting-ip=true` and the
    10-minute `relay connection stats` records show a plausible
-   `activeClientIPs` count rather than one shared proxy bucket.
+   `activeClientIPs` count rather than one shared proxy bucket. The
+   `rejectedConnections` field is cumulative since process start.
 5. Restore `LOG_LEVEL=info` after verification because debug records contain
    client IP addresses.
 
