@@ -969,6 +969,150 @@ func TestHandler_NotificationsClient_ForwardsBridgeID(t *testing.T) {
 	}
 }
 
+func TestHandler_BridgeDisconnectPolicyPreservesAwakeEligibility(t *testing.T) {
+	const secret = "test-relay-secret"
+
+	type captured struct {
+		bridgeID string
+		status   string
+		event    string
+		policy   string
+	}
+	capturedCh := make(chan captured, 12)
+	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			BridgeID string `json:"bridgeId"`
+			Status   string `json:"status"`
+			Event    string `json:"event"`
+			Policy   string `json:"notificationPolicy"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		capturedCh <- captured{
+			bridgeID: payload.BridgeID,
+			status:   payload.Status,
+			event:    payload.Event,
+			policy:   payload.Policy,
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(notifServer.Close)
+
+	notif := notifications.NewClient(notifServer.URL, secret)
+	env := newTestEnv(t, testEnvOpts{notificationsClient: notif})
+	readMatching := func(label string, matches func(captured) bool) captured {
+		t.Helper()
+		deadline := time.After(2 * time.Second)
+		for {
+			select {
+			case event := <-capturedCh:
+				if matches(event) {
+					return event
+				}
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s", label)
+				return captured{}
+			}
+		}
+	}
+	connect := func(bridgeID, policy string) *websocket.Conn {
+		t.Helper()
+		ctx := context.Background()
+		conn, err := env.dial(ctx)
+		if err != nil {
+			t.Fatalf("dial bridge: %v", err)
+		}
+		message := fmt.Sprintf(
+			`{"type":"auth","token":"%s","role":"bridge","bridgeId":%q,"connectionNotificationPolicy":%q}`,
+			env.makeAccessToken("user1"),
+			bridgeID,
+			policy,
+		)
+		if err := conn.Write(ctx, websocket.MessageText, []byte(message)); err != nil {
+			conn.CloseNow()
+			t.Fatalf("send auth: %v", err)
+		}
+		return conn
+	}
+
+	awakeBridgeID := "br_awakePolicy01"
+	awakeBridge := connect(awakeBridgeID, protocol.ConnectionNotificationPolicyNormal)
+	readMatching("awake connected", func(event captured) bool {
+		return event.bridgeID == awakeBridgeID && event.status == notifications.BridgeStatusConnected && event.event == ""
+	})
+	if err := awakeBridge.Write(context.Background(), websocket.MessageText, []byte(
+		`{"type":"bridge_connection_notification_policy","policy":"suppress"}`,
+	)); err != nil {
+		t.Fatalf("send suppress policy: %v", err)
+	}
+	readMatching("awake suppress update", func(event captured) bool {
+		return event.bridgeID == awakeBridgeID && event.event == "notification_policy" && event.policy == protocol.ConnectionNotificationPolicySuppress
+	})
+	awakeBridge.CloseNow()
+	awakeDisconnect := readMatching("awake disconnect", func(event captured) bool {
+		return event.bridgeID == awakeBridgeID && event.status == notifications.BridgeStatusDisconnected
+	})
+	if awakeDisconnect.policy != protocol.ConnectionNotificationPolicyNormal {
+		t.Fatalf("awake connection lost offline eligibility: %+v", awakeDisconnect)
+	}
+
+	darkWakeBridgeID := "br_darkWakeOnly1"
+	darkWakeBridge := connect(darkWakeBridgeID, protocol.ConnectionNotificationPolicySuppress)
+	readMatching("DarkWake connected", func(event captured) bool {
+		return event.bridgeID == darkWakeBridgeID && event.status == notifications.BridgeStatusConnected
+	})
+	darkWakeBridge.CloseNow()
+	darkWakeDisconnect := readMatching("DarkWake disconnect", func(event captured) bool {
+		return event.bridgeID == darkWakeBridgeID && event.status == notifications.BridgeStatusDisconnected
+	})
+	if darkWakeDisconnect.policy != protocol.ConnectionNotificationPolicySuppress {
+		t.Fatalf("DarkWake-only connection became offline-eligible: %+v", darkWakeDisconnect)
+	}
+
+	promotedBridgeID := "br_wakePromoted1"
+	promotedBridge := connect(promotedBridgeID, protocol.ConnectionNotificationPolicySuppress)
+	readMatching("promoted bridge connected", func(event captured) bool {
+		return event.bridgeID == promotedBridgeID && event.status == notifications.BridgeStatusConnected && event.event == ""
+	})
+	if err := promotedBridge.Write(context.Background(), websocket.MessageText, []byte(
+		`{"type":"bridge_connection_notification_policy","policy":"normal"}`,
+	)); err != nil {
+		t.Fatalf("send normal policy: %v", err)
+	}
+	readMatching("full-wake policy update", func(event captured) bool {
+		return event.bridgeID == promotedBridgeID && event.event == "notification_policy" && event.policy == protocol.ConnectionNotificationPolicyNormal
+	})
+	promotedBridge.CloseNow()
+	promotedDisconnect := readMatching("promoted bridge disconnect", func(event captured) bool {
+		return event.bridgeID == promotedBridgeID && event.status == notifications.BridgeStatusDisconnected
+	})
+	if promotedDisconnect.policy != protocol.ConnectionNotificationPolicyNormal {
+		t.Fatalf("full-wake promotion did not restore offline eligibility: %+v", promotedDisconnect)
+	}
+
+	fallbackBridgeID := "br_wakeFallback1"
+	fallbackBridge := connect(fallbackBridgeID, protocol.ConnectionNotificationPolicySuppress)
+	readMatching("fallback bridge connected", func(event captured) bool {
+		return event.bridgeID == fallbackBridgeID && event.event == ""
+	})
+	if err := fallbackBridge.Write(context.Background(), websocket.MessageText, []byte(
+		`{"type":"bridge_connection_notification_policy","policy":"future-policy"}`,
+	)); err != nil {
+		t.Fatalf("send unknown policy: %v", err)
+	}
+	readMatching("conservative fallback update", func(event captured) bool {
+		return event.bridgeID == fallbackBridgeID && event.event == "notification_policy" && event.policy == protocol.ConnectionNotificationPolicyConservative
+	})
+	fallbackBridge.CloseNow()
+	fallbackDisconnect := readMatching("fallback bridge disconnect", func(event captured) bool {
+		return event.bridgeID == fallbackBridgeID && event.status == notifications.BridgeStatusDisconnected
+	})
+	if fallbackDisconnect.policy != protocol.ConnectionNotificationPolicyConservative {
+		t.Fatalf("unknown policy preserved prior suppression: %+v", fallbackDisconnect)
+	}
+}
+
 func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing.T) {
 	const secret = "test-relay-secret"
 

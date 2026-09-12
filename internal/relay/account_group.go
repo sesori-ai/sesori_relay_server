@@ -8,10 +8,11 @@ import (
 )
 
 type Connection struct {
-	Conn     *websocket.Conn
-	ConnID   uint16
-	Cancel   context.CancelFunc
-	BridgeID string // empty for phones; populated for bridge connections (per-instance identifier from sesori_auth_server)
+	Conn         *websocket.Conn
+	ConnID       uint16
+	Cancel       context.CancelFunc
+	BridgeID     string // empty for phones; populated for bridge connections (per-instance identifier from sesori_auth_server)
+	ConnectionID string // ephemeral correlation for connection-notification policy only
 }
 
 type AccountGroup struct {
@@ -91,6 +92,21 @@ func (g *AccountGroup) PhoneIfCurrentBridge(bridge *Connection, connID uint16) *
 		return nil
 	}
 	return g.Phones[connID]
+}
+
+func (g *AccountGroup) IsCurrentBridge(bridge *Connection) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.Bridge == bridge
+}
+
+func (g *AccountGroup) BridgeForCurrentPhone(phone *Connection) *Connection {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if phone == nil || g.Phones[phone.ConnID] != phone {
+		return nil
+	}
+	return g.Bridge
 }
 
 // IsEmpty returns true if the group has no bridge and no phone connections.

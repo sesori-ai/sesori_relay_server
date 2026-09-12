@@ -45,13 +45,19 @@ func TestClient_NotifyBridgeStatus_Success(t *testing.T) {
 		if _, err := time.Parse(time.RFC3339, payload.Timestamp); err != nil {
 			t.Fatalf("timestamp not RFC3339: %v", err)
 		}
+		if payload.Event != "notification_policy" || payload.NotificationPolicy != "normal" || payload.ConnectionID != "connection-1" {
+			t.Fatalf("missing bounded policy metadata: %+v", payload)
+		}
 
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer ts.Close()
 
 	client := NewClient(ts.URL, secret)
-	err := client.NotifyBridgeStatus(context.Background(), "user-123", "br_abc12345", BridgeStatusConnected)
+	err := client.NotifyBridgeStatus(context.Background(), BridgeStatusPayload{
+		UserID: "user-123", BridgeID: "br_abc12345", Status: BridgeStatusConnected,
+		Event: "notification_policy", NotificationPolicy: "normal", ConnectionID: "connection-1",
+	})
 	if err != nil {
 		t.Fatalf("NotifyBridgeStatus returned error: %v", err)
 	}
@@ -64,7 +70,7 @@ func TestClient_NotifyBridgeStatus_Unauthorized(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "secret")
-	err := client.NotifyBridgeStatus(context.Background(), "user-123", "br_abc12345", BridgeStatusConnected)
+	err := client.NotifyBridgeStatus(context.Background(), BridgeStatusPayload{UserID: "user-123", BridgeID: "br_abc12345", Status: BridgeStatusConnected})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -80,7 +86,7 @@ func TestClient_NotifyBridgeStatus_ServerError(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "secret")
-	err := client.NotifyBridgeStatus(context.Background(), "user-123", "br_abc12345", BridgeStatusDisconnected)
+	err := client.NotifyBridgeStatus(context.Background(), BridgeStatusPayload{UserID: "user-123", BridgeID: "br_abc12345", Status: BridgeStatusDisconnected})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -99,7 +105,7 @@ func TestClient_NotifyBridgeStatus_NotFound(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "secret")
-	err := client.NotifyBridgeStatus(context.Background(), "user-123", "br_abc12345", BridgeStatusConnected)
+	err := client.NotifyBridgeStatus(context.Background(), BridgeStatusPayload{UserID: "user-123", BridgeID: "br_abc12345", Status: BridgeStatusConnected})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -116,7 +122,7 @@ func TestClient_NotifyBridgeStatus_ServerUnreachable(t *testing.T) {
 	ts.Close()
 
 	client := NewClient(url, "secret")
-	err := client.NotifyBridgeStatus(context.Background(), "user-123", "br_abc12345", BridgeStatusConnected)
+	err := client.NotifyBridgeStatus(context.Background(), BridgeStatusPayload{UserID: "user-123", BridgeID: "br_abc12345", Status: BridgeStatusConnected})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
