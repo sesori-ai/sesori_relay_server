@@ -22,10 +22,14 @@ const (
 var ErrBridgeNotFound = errors.New("bridge not found")
 
 type BridgeStatusPayload struct {
-	UserID    string `json:"userId"`
-	BridgeID  string `json:"bridgeId"`
-	Status    string `json:"status"`
-	Timestamp string `json:"timestamp"`
+	UserID             string `json:"userId"`
+	BridgeID           string `json:"bridgeId"`
+	Status             string `json:"status"`
+	Timestamp          string `json:"timestamp"`
+	Event              string `json:"event,omitempty"`
+	NotificationPolicy string `json:"notificationPolicy,omitempty"`
+	ConnectionID       string `json:"connectionId,omitempty"`
+	DeviceID           string `json:"deviceId,omitempty"`
 }
 
 type Client struct {
@@ -44,14 +48,11 @@ func NewClient(baseURL string, secret string) *Client {
 	}
 }
 
-func (c *Client) NotifyBridgeStatus(ctx context.Context, userID, bridgeID, status string) error {
-	payload := BridgeStatusPayload{
-		UserID:    userID,
-		BridgeID:  bridgeID,
-		Status:    status,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
+func (c *Client) NotifyBridgeStatus(ctx context.Context, payload BridgeStatusPayload) error {
 
+	if payload.Timestamp == "" {
+		payload.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)

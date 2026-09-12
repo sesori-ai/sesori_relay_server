@@ -7,14 +7,16 @@ import (
 
 // Message type constants for the wire protocol.
 const (
-	TypeAuth           = "auth"
-	TypeKeyExchange    = "key_exchange"
-	TypeReady          = "ready"
-	TypeRequest        = "request"
-	TypeResponse       = "response"
-	TypeSSESubscribe   = "sse_subscribe"
-	TypeSSEUnsubscribe = "sse_unsubscribe"
-	TypeSSEEvent       = "sse_event"
+	TypeAuth                               = "auth"
+	TypeKeyExchange                        = "key_exchange"
+	TypeReady                              = "ready"
+	TypeRequest                            = "request"
+	TypeResponse                           = "response"
+	TypeSSESubscribe                       = "sse_subscribe"
+	TypeSSEUnsubscribe                     = "sse_unsubscribe"
+	TypeSSEEvent                           = "sse_event"
+	TypeBridgeConnectionNotificationPolicy = "bridge_connection_notification_policy"
+	TypeBridgeConnectionObserved           = "bridge_connection_observed"
 
 	// Control messages sent by relay
 	TypePhoneConnected     = "phone_connected"
@@ -25,6 +27,10 @@ const (
 	// Connection roles
 	RoleBridge = "bridge"
 	RolePhone  = "phone"
+
+	ConnectionNotificationPolicyNormal       = "normal"
+	ConnectionNotificationPolicySuppress     = "suppress"
+	ConnectionNotificationPolicyConservative = "conservative"
 )
 
 // Envelope wraps all messages with a type discriminator
@@ -40,10 +46,21 @@ type KeyExchangeMessage struct {
 
 // RoleAuthMessage - client sends this plaintext as first message after WebSocket connect
 type RoleAuthMessage struct {
-	Type     string `json:"type"` // "auth"
-	Token    string `json:"token"`
-	Role     string `json:"role"`               // "bridge" or "phone"
-	BridgeID string `json:"bridgeId,omitempty"` // required for bridges, ignored for phones. Format: ^br_[A-Za-z0-9_-]{8,32}$.
+	Type                         string `json:"type"` // "auth"
+	Token                        string `json:"token"`
+	Role                         string `json:"role"`               // "bridge" or "phone"
+	BridgeID                     string `json:"bridgeId,omitempty"` // required for bridges, ignored for phones. Format: ^br_[A-Za-z0-9_-]{8,32}$.
+	ConnectionNotificationPolicy string `json:"connectionNotificationPolicy,omitempty"`
+}
+
+type BridgeConnectionNotificationPolicyMessage struct {
+	Type   string `json:"type"`
+	Policy string `json:"policy"`
+}
+
+type BridgeConnectionObservedMessage struct {
+	Type     string `json:"type"`
+	DeviceID string `json:"deviceId"`
 }
 
 // PhoneConnectedMessage is sent by relay to bridge when a phone joins.
