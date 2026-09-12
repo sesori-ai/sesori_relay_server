@@ -115,8 +115,10 @@ Roles: `"bridge"` or `"phone"`. The relay closes the connection if auth fails.
 | `bridge_connection_observed` | phone → relay | Bounded device UUID proving that exact surface restored E2E connectivity; used only to suppress its pending online push |
 
 These two client controls are plaintext connection metadata. Relay validates and forwards them to auth with an
-in-memory socket correlation ID, but never decrypts or inspects binary session traffic. Missing or invalid metadata
-falls back to normal conservative notification behavior and cannot close or delay transport.
+in-memory socket correlation ID, but never decrypts or inspects binary session traffic. A socket that earned offline
+notification eligibility while normally awake retains it across later sleep suppression; a suppress-only socket stays
+quiet unless a normal/full-wake update promotes it. Missing or invalid metadata falls back to normal conservative
+notification behavior and cannot close or delay transport.
 
 ### Data frames (binary)
 

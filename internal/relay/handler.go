@@ -203,6 +203,10 @@ func startPingLoop(ctx context.Context, cancel context.CancelFunc, conn *websock
 
 func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup, manager *GroupManager, userID, bridgeID, requestedPolicy string, notificationsClient *notifications.Client) {
 	policy := normalizeNotificationPolicy(requestedPolicy)
+	// Disconnect eligibility belongs to this socket episode. A later sleep
+	// suppression hides DarkWake-only online churn but must not erase offline
+	// eligibility already earned while the socket was normally awake.
+	disconnectPolicy := policy
 	connectionID := newConnectionID()
 	group.mu.Lock()
 	oldBridge := group.Bridge
@@ -329,7 +333,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 			go func() {
 				if err := notificationsClient.NotifyBridgeStatus(context.Background(), notifications.BridgeStatusPayload{
 					UserID: userID, BridgeID: bridgeID, Status: notifications.BridgeStatusDisconnected,
-					Timestamp: disconnectedAt, NotificationPolicy: policy, ConnectionID: connectionID,
+					Timestamp: disconnectedAt, NotificationPolicy: disconnectPolicy, ConnectionID: connectionID,
 				}); err != nil {
 					slog.Warn("failed to notify bridge disconnected", "error", err, "userId", userID, "bridgeId", bridgeID)
 				}
@@ -355,6 +359,9 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 				continue
 			}
 			policy = updatedPolicy
+			if updatedPolicy != protocol.ConnectionNotificationPolicySuppress {
+				disconnectPolicy = updatedPolicy
+			}
 			if notificationsClient != nil {
 				changedAt := time.Now().UTC().Format(time.RFC3339Nano)
 				go func(capturedPolicy string) {
