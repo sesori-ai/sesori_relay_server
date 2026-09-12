@@ -118,7 +118,10 @@ These two client controls are plaintext connection metadata. Relay validates and
 in-memory socket correlation ID, but never decrypts or inspects binary session traffic. A socket that earned offline
 notification eligibility while normally awake retains it across later sleep suppression; a suppress-only socket stays
 quiet unless a normal/full-wake update promotes it. Missing or invalid metadata falls back to normal conservative
-notification behavior and cannot close or delay transport.
+notification behavior and cannot close or delay transport. Advisory control reports use one HTTP sender and one
+latest-value pending slot per socket; a slow auth server cannot accumulate per-frame request goroutines or block binary
+routing. In-flight advisory requests end with the socket context. Initial registration validation and disconnected
+status reporting retain their separate existing lifecycle behavior.
 
 ### Data frames (binary)
 

@@ -42,7 +42,7 @@ type clientIPInfo struct {
 }
 
 var bridgeIDRegexp = regexp.MustCompile(`^br_[A-Za-z0-9_-]{8,32}$`)
-var deviceIDRegexp = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+var deviceIDRegexp = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 var (
 	bridgeConnectedJSON, _    = json.Marshal(protocol.BridgeConnectedMessage{Type: protocol.TypeBridgeConnected})
@@ -215,6 +215,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 	group.Bridge = newConn
 	group.mu.Unlock()
 	startPingLoop(connCtx, connCancel, conn)
+	reportControl := newControlReportSender(connCtx, notificationsClient)
 
 	phones := group.AllPhones()
 
@@ -273,10 +274,10 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 
 	if notificationsClient != nil {
 		connectedAt := time.Now().UTC().Format(time.RFC3339Nano)
-		go func() {
+		go func(initialPolicy string) {
 			err := notificationsClient.NotifyBridgeStatus(context.Background(), notifications.BridgeStatusPayload{
 				UserID: userID, BridgeID: bridgeID, Status: notifications.BridgeStatusConnected,
-				Timestamp: connectedAt, NotificationPolicy: policy, ConnectionID: connectionID,
+				Timestamp: connectedAt, NotificationPolicy: initialPolicy, ConnectionID: connectionID,
 			})
 			if err == nil {
 				return
@@ -294,7 +295,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 			// Transport errors, timeouts, and 5xx are fail-open: log and keep
 			// the connection.
 			slog.Warn("failed to notify bridge connected", "error", err, "userId", userID, "bridgeId", bridgeID)
-		}()
+		}(policy)
 	}
 
 	defer func() {
@@ -355,26 +356,18 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 				continue
 			}
 			updatedPolicy := normalizeNotificationPolicy(message.Policy)
-			if updatedPolicy != message.Policy || !group.IsCurrentBridge(newConn) {
+			if !group.IsCurrentBridge(newConn) {
 				continue
 			}
 			policy = updatedPolicy
 			if updatedPolicy != protocol.ConnectionNotificationPolicySuppress {
 				disconnectPolicy = updatedPolicy
 			}
-			if notificationsClient != nil {
-				changedAt := time.Now().UTC().Format(time.RFC3339Nano)
-				go func(capturedPolicy string) {
-					err := notificationsClient.NotifyBridgeStatus(context.Background(), notifications.BridgeStatusPayload{
-						UserID: userID, BridgeID: bridgeID, Status: notifications.BridgeStatusConnected,
-						Timestamp: changedAt, Event: "notification_policy", NotificationPolicy: capturedPolicy,
-						ConnectionID: connectionID,
-					})
-					if err != nil {
-						slog.Warn("failed to update bridge notification policy", "error", err, "userId", userID, "bridgeId", bridgeID)
-					}
-				}(policy)
-			}
+			reportControl(notifications.BridgeStatusPayload{
+				UserID: userID, BridgeID: bridgeID, Status: notifications.BridgeStatusConnected,
+				Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Event: "notification_policy",
+				NotificationPolicy: policy, ConnectionID: connectionID,
+			})
 			continue
 		}
 		if len(data) < 2 {
@@ -443,6 +436,7 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 	}
 
 	startPingLoop(connCtx, connCancel, conn)
+	reportControl := newControlReportSender(connCtx, notificationsClient)
 
 	if bridgeConn != nil {
 		phoneConnMsg, err := json.Marshal(protocol.PhoneConnectedMessage{Type: protocol.TypePhoneConnected, ConnID: connID})
@@ -489,15 +483,11 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 			if bridge == nil || bridge.ConnectionID == "" || notificationsClient == nil {
 				continue
 			}
-			observedAt := time.Now().UTC().Format(time.RFC3339Nano)
-			go func(bridgeID, connectionID, deviceID string) {
-				if err := notificationsClient.NotifyBridgeStatus(context.Background(), notifications.BridgeStatusPayload{
-					UserID: userID, BridgeID: bridgeID, Status: notifications.BridgeStatusConnected,
-					Timestamp: observedAt, Event: "connection_observed", ConnectionID: connectionID, DeviceID: deviceID,
-				}); err != nil {
-					slog.Warn("failed to report observed bridge connection", "error", err, "userId", userID, "bridgeId", bridgeID)
-				}
-			}(bridge.BridgeID, bridge.ConnectionID, message.DeviceID)
+			reportControl(notifications.BridgeStatusPayload{
+				UserID: userID, BridgeID: bridge.BridgeID, Status: notifications.BridgeStatusConnected,
+				Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Event: "connection_observed",
+				ConnectionID: bridge.ConnectionID, DeviceID: message.DeviceID,
+			})
 			continue
 		}
 
@@ -512,6 +502,44 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 		binary.BigEndian.PutUint16(framed[:2], connID)
 		copy(framed[2:], data)
 		_ = bridge.Conn.Write(ctx, websocket.MessageBinary, framed)
+	}
+}
+
+// One sender and one pending latest-value report per socket. The socket read
+// loop is the sole producer, and never waits for HTTP or a free queue slot.
+// Control reports are advisory: even a 404 must not control socket lifetime.
+func newControlReportSender(ctx context.Context, client *notifications.Client) func(notifications.BridgeStatusPayload) {
+	if client == nil {
+		return func(notifications.BridgeStatusPayload) {}
+	}
+	reports := make(chan notifications.BridgeStatusPayload, 1)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case report := <-reports:
+				if ctx.Err() != nil {
+					return
+				}
+				if err := client.NotifyBridgeStatus(ctx, report); err != nil {
+					slog.Warn("failed to report connection notification metadata", "error", err,
+						"userId", report.UserID, "bridgeId", report.BridgeID, "event", report.Event)
+				}
+			}
+		}
+	}()
+	return func(report notifications.BridgeStatusPayload) {
+		select {
+		case reports <- report:
+		default:
+			// Replace an obsolete queued value, not the in-flight HTTP request.
+			select {
+			case <-reports:
+			default:
+			}
+			reports <- report // Single producer: the queue now has room.
+		}
 	}
 }
 

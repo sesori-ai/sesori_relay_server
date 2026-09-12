@@ -1090,6 +1090,27 @@ func TestHandler_BridgeDisconnectPolicyPreservesAwakeEligibility(t *testing.T) {
 	if promotedDisconnect.policy != protocol.ConnectionNotificationPolicyNormal {
 		t.Fatalf("full-wake promotion did not restore offline eligibility: %+v", promotedDisconnect)
 	}
+
+	fallbackBridgeID := "br_wakeFallback1"
+	fallbackBridge := connect(fallbackBridgeID, protocol.ConnectionNotificationPolicySuppress)
+	readMatching("fallback bridge connected", func(event captured) bool {
+		return event.bridgeID == fallbackBridgeID && event.event == ""
+	})
+	if err := fallbackBridge.Write(context.Background(), websocket.MessageText, []byte(
+		`{"type":"bridge_connection_notification_policy","policy":"future-policy"}`,
+	)); err != nil {
+		t.Fatalf("send unknown policy: %v", err)
+	}
+	readMatching("conservative fallback update", func(event captured) bool {
+		return event.bridgeID == fallbackBridgeID && event.event == "notification_policy" && event.policy == protocol.ConnectionNotificationPolicyConservative
+	})
+	fallbackBridge.CloseNow()
+	fallbackDisconnect := readMatching("fallback bridge disconnect", func(event captured) bool {
+		return event.bridgeID == fallbackBridgeID && event.status == notifications.BridgeStatusDisconnected
+	})
+	if fallbackDisconnect.policy != protocol.ConnectionNotificationPolicyConservative {
+		t.Fatalf("unknown policy preserved prior suppression: %+v", fallbackDisconnect)
+	}
 }
 
 func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing.T) {
