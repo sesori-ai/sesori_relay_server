@@ -3,6 +3,7 @@ package relay
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestNewAccountGroup(t *testing.T) {
@@ -16,14 +17,14 @@ func TestNewAccountGroup(t *testing.T) {
 	if g.Phones == nil {
 		t.Error("expected non-nil Phones map")
 	}
-	if g.Bridge != nil {
-		t.Error("expected nil Bridge")
+	if g.Bridges == nil || len(g.Bridges) != 0 {
+		t.Error("expected empty Bridges map")
 	}
 }
 
 func TestAccountGroup_AssignConnID_StartsAtOne(t *testing.T) {
 	g := NewAccountGroup("user1")
-	id := g.AssignConnID()
+	id := g.assignConnIDLocked()
 	if id != 1 {
 		t.Errorf("expected first ID 1, got %d", id)
 	}
@@ -32,7 +33,7 @@ func TestAccountGroup_AssignConnID_StartsAtOne(t *testing.T) {
 func TestAccountGroup_AssignConnID_Monotonic(t *testing.T) {
 	g := NewAccountGroup("user1")
 	for i := uint16(1); i <= 10; i++ {
-		id := g.AssignConnID()
+		id := g.assignConnIDLocked()
 		if id != i {
 			t.Errorf("expected ID %d, got %d", i, id)
 		}
@@ -43,8 +44,8 @@ func TestAccountGroup_AssignConnID_WrapSkipsZero(t *testing.T) {
 	g := NewAccountGroup("user1")
 	g.NextConnID = 65535
 
-	id1 := g.AssignConnID()
-	id2 := g.AssignConnID()
+	id1 := g.assignConnIDLocked()
+	id2 := g.assignConnIDLocked()
 
 	if id1 != 65535 {
 		t.Errorf("expected 65535, got %d", id1)
@@ -59,39 +60,39 @@ func TestAccountGroup_AssignConnID_NeverReturnsZero(t *testing.T) {
 	g.NextConnID = 65534
 
 	for i := 0; i < 5; i++ {
-		id := g.AssignConnID()
+		id := g.assignConnIDLocked()
 		if id == 0 {
 			t.Errorf("AssignConnID returned 0 on iteration %d", i)
 		}
 	}
 }
 
-func TestAccountGroup_AssignConnID_Concurrent(t *testing.T) {
+func TestAccountGroup_AddPhone_ConcurrentDistinctIDs(t *testing.T) {
 	g := NewAccountGroup("user1")
 
-	const n = 100
-	ids := make([]uint16, n)
+	phones := make([]*Connection, maxPhonesPerAccount)
 	var wg sync.WaitGroup
-
-	for i := 0; i < n; i++ {
+	for i := range phones {
+		phones[i] = &Connection{}
 		wg.Add(1)
-		idx := i
-		go func() {
+		go func(phone *Connection) {
 			defer wg.Done()
-			ids[idx] = g.AssignConnID()
-		}()
+			if _, ok := g.AddPhone(phone); !ok {
+				t.Error("AddPhone rejected a phone below the cap")
+			}
+		}(phones[i])
 	}
 	wg.Wait()
 
 	seen := make(map[uint16]bool)
-	for i, id := range ids {
-		if id == 0 {
-			t.Errorf("goroutine %d got ID 0", i)
+	for _, phone := range phones {
+		if phone.ConnID == 0 || seen[phone.ConnID] {
+			t.Errorf("connId %d is zero or duplicate", phone.ConnID)
 		}
-		if seen[id] {
-			t.Errorf("duplicate ID %d", id)
-		}
-		seen[id] = true
+		seen[phone.ConnID] = true
+	}
+	if _, ok := g.AddPhone(&Connection{}); ok {
+		t.Error("AddPhone accepted a phone above the cap")
 	}
 }
 
@@ -127,7 +128,7 @@ func TestGroupManager_RemoveGroupIfEmpty_WithBridge(t *testing.T) {
 	m := NewGroupManager()
 	g := m.GetOrCreateGroup("user1")
 
-	g.Bridge = &Connection{}
+	g.Bridges["br_x"] = &Connection{BridgeID: "br_x"}
 
 	m.RemoveGroupIfEmpty("user1", g)
 
@@ -188,7 +189,7 @@ func TestGroupManager_HasLiveBridgeWithID(t *testing.T) {
 		t.Error("expected false with no bridge")
 	}
 
-	g.Bridge = &Connection{BridgeID: "br_x"}
+	g.Bridges["br_x"] = &Connection{BridgeID: "br_x"}
 	if !m.HasLiveBridgeWithID("user1", "br_x") {
 		t.Error("expected true for the live bridge id")
 	}
@@ -240,5 +241,55 @@ func TestGroupManager_Count_ReflectsRemovals(t *testing.T) {
 
 	if m.Count() != 1 {
 		t.Errorf("expected 1 after two removals, got %d", m.Count())
+	}
+}
+
+// --- multi-bridge routing: default selection and pins (target changes are
+// covered end to end in handler_test.go) ---
+
+func testBridge(id string, connectedAt time.Time) *Connection {
+	return &Connection{BridgeID: id, ConnectedAt: connectedAt}
+}
+
+func addTestBridge(t *testing.T, g *AccountGroup, bridge *Connection) {
+	t.Helper()
+	if _, _, ok := g.AddBridge(bridge); !ok {
+		t.Fatalf("AddBridge(%s) rejected", bridge.BridgeID)
+	}
+}
+
+func addTestPhone(t *testing.T, g *AccountGroup, pin string) *Connection {
+	t.Helper()
+	phone := &Connection{BridgeID: pin}
+	if _, ok := g.AddPhone(phone); !ok {
+		t.Fatal("AddPhone rejected")
+	}
+	return phone
+}
+
+func TestAccountGroup_DefaultIsLatestConnectedBridge(t *testing.T) {
+	g := NewAccountGroup("user1")
+	start := time.Now()
+	older := testBridge("br_olderBridge1", start)
+	newer := testBridge("br_newerBridge1", start.Add(time.Second))
+	addTestBridge(t, g, newer)
+	addTestBridge(t, g, older)
+
+	unpinned := addTestPhone(t, g, "")
+	pinned := addTestPhone(t, g, older.BridgeID)
+	if got := g.BridgeForPhone(unpinned); got != newer {
+		t.Errorf("unpinned phone target = %v, want the latest bridge", got)
+	}
+	if got := g.BridgeForPhone(pinned); got != older {
+		t.Errorf("pinned phone target = %v, want its pinned bridge", got)
+	}
+
+	// Equal timestamps resolve by bridge id, so the choice never flips.
+	tied := testBridge("br_zzzzzzzzzz", newer.ConnectedAt)
+	addTestBridge(t, g, tied)
+	for i := 0; i < 20; i++ {
+		if got := g.BridgeForPhone(unpinned); got != tied {
+			t.Fatalf("tie resolved to %v, want %s", got, tied.BridgeID)
+		}
 	}
 }

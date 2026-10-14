@@ -24,6 +24,7 @@ import (
 const (
 	maxMessageSize       = 64 * 1024 * 1024 // 64 MiB — session data can be large
 	maxPhonesPerAccount  = 5
+	maxBridgesPerAccount = 10
 	pingInterval         = 30 * time.Second
 	cfConnectingIPHeader = "CF-Connecting-IP"
 )
@@ -127,17 +128,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := authResult.UserID
 
-	if authMsg.Role == protocol.RoleBridge {
-		if authMsg.BridgeID == "" {
-			slog.Debug("bridge connection rejected: bridgeId required", "userId", userID)
-			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridgeId required")
-			return
-		}
-		if !bridgeIDRegexp.MatchString(authMsg.BridgeID) {
-			slog.Debug("bridge connection rejected: invalid bridgeId format", "userId", userID, "bridgeId", authMsg.BridgeID)
-			_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid bridgeId format")
-			return
-		}
+	if authMsg.Role == protocol.RoleBridge && authMsg.BridgeID == "" {
+		slog.Debug("bridge connection rejected: bridgeId required", "userId", userID)
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "bridgeId required")
+		return
+	}
+	// Bridges name themselves; a phone may name (pin) the bridge it talks to.
+	if authMsg.BridgeID != "" && !bridgeIDRegexp.MatchString(authMsg.BridgeID) {
+		slog.Debug("connection rejected: invalid bridgeId format", "userId", userID, "role", authMsg.Role, "bridgeId", authMsg.BridgeID)
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAuthFailure), "invalid bridgeId format")
+		return
 	}
 
 	group := s.manager.GetOrCreateGroup(userID)
@@ -147,7 +147,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		handleBridge(r.Context(), conn, group, s.manager, userID, authMsg.BridgeID, authMsg.ConnectionNotificationPolicy, s.notifications)
 		return
 	}
-	handlePhone(r.Context(), conn, group, s.manager, userID, s.notifications)
+	handlePhone(r.Context(), conn, group, s.manager, userID, authMsg.BridgeID, s.notifications)
 }
 
 func readAndValidateAuth(ctx context.Context, conn *websocket.Conn, jwtAuth *auth.JWTAuthenticator) (protocol.RoleAuthMessage, auth.AuthResult, bool) {
@@ -208,22 +208,25 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 	// eligibility already earned while the socket was normally awake.
 	disconnectPolicy := policy
 	connectionID := newConnectionID()
-	group.mu.Lock()
-	oldBridge := group.Bridge
 	connCtx, connCancel := context.WithCancel(ctx)
-	newConn := &Connection{Conn: conn, ConnID: 0, Cancel: connCancel, BridgeID: bridgeID, ConnectionID: connectionID}
-	group.Bridge = newConn
-	group.mu.Unlock()
+	newConn := &Connection{Conn: conn, Cancel: connCancel, BridgeID: bridgeID, ConnectionID: connectionID, ConnectedAt: time.Now()}
+	displaced, changes, ok := group.AddBridge(newConn)
+	if !ok {
+		connCancel()
+		slog.Debug("bridge connection rejected: account has too many bridges", "userId", userID, "bridgeId", bridgeID)
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAccountFull), "account full")
+		return
+	}
 	startPingLoop(connCtx, connCancel, conn)
 	reportControl := newControlReportSender(connCtx, notificationsClient)
 
-	phones := group.AllPhones()
-
-	if oldBridge != nil {
-		// Displace the old bridge with the dedicated takeover close code so the
-		// displaced bridge recognises the takeover and backs off instead of
-		// tight-looping. Correctness rests on a strict order — Close, then
-		// Cancel — run off the hot path in one goroutine:
+	if displaced != nil {
+		// Displace the previous connection with this bridgeId (the same
+		// computer reconnecting) with the dedicated takeover close code so it
+		// recognises the takeover and backs off instead of tight-looping. A
+		// bridge with a different id never displaces anyone. Correctness rests
+		// on a strict order — Close, then Cancel — run off the hot path in one
+		// goroutine:
 		//
 		//   * Close wins the close CAS and writes the CloseBridgeReplaced frame
 		//     synchronously (writeClose runs before the handshake wait), so the
@@ -237,7 +240,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		//     slow/non-responsive displaced peer only delays that bridge's own
 		//     disconnect bookkeeping up to the handshake timeout — a best-effort
 		//     lag, never a correctness issue, and phones already learned of the
-		//     new bridge via the bridge_connected writes below.
+		//     new connection via the bridge_connected writes below.
 		//
 		// 4007 delivery is deliberately best-effort (accepted tradeoff, PR #7):
 		// the close frame contends for the connection's frame-write mutex with
@@ -253,24 +256,22 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		// certainly with no write in flight, and observes 4007 then — so it
 		// degrades to at most one extra reconnect, not a reconnect war.
 		//
-		// The single-active-bridge invariant does NOT depend on this close
-		// timing: the read loop's PhonesIfCurrentBridge / PhoneIfCurrentBridge
-		// routing (see below) drops any frame from a bridge that is no longer
-		// group.Bridge, so a displaced bridge can never relay even in the window
-		// before its close/cancel lands.
+		// Routing does NOT depend on this close timing: the read loop's
+		// PhonesTargeting / PhoneTargeting (see below) drops any frame from a
+		// connection that is no longer current for its bridgeId, so a displaced
+		// connection can never relay even in the window before its
+		// close/cancel lands.
 		//
 		// Keep the "replaced" reason as a rollout fallback the bridge can match
 		// on until it keys purely on CloseBridgeReplaced; the code is
 		// authoritative.
 		go func() {
-			_ = oldBridge.Conn.Close(websocket.StatusCode(protocol.CloseBridgeReplaced), "replaced")
-			oldBridge.Cancel()
+			_ = displaced.Conn.Close(websocket.StatusCode(protocol.CloseBridgeReplaced), "replaced")
+			displaced.Cancel()
 		}()
 	}
 
-	for _, phone := range phones {
-		_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeConnectedJSON)
-	}
+	announceTargetChanges(ctx, changes)
 
 	if notificationsClient != nil {
 		connectedAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -300,34 +301,18 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 
 	defer func() {
 		connCancel()
-		group.mu.Lock()
-		isCurrent := group.Bridge == newConn
-		currentBridgeID := ""
-		if group.Bridge != nil {
-			currentBridgeID = group.Bridge.BridgeID
-		}
-		if isCurrent {
-			group.Bridge = nil
-		}
-		group.mu.Unlock()
-		shouldNotifyDisconnected := isCurrent || bridgeID != currentBridgeID
+		// A connection displaced by a same-id reconnect is no longer current:
+		// its replacement already owns the phones and the bridge's online
+		// state, so it changes nothing and reports nothing.
+		isCurrent, changes := group.RemoveBridge(newConn)
+		announceTargetChanges(ctx, changes)
 
 		// Suppress the disconnect notification if this bridgeId is already live
-		// again on the user's current group: a displaced handler whose teardown
-		// runs late (widened by the Close-then-Cancel ordering) must not mark a
-		// freshly-reconnected bridge with the same id offline in the auth server
-		// after its connected notification. This checks the manager's current
-		// registration, not this handler's own (possibly stale) group.
-		if shouldNotifyDisconnected && manager.HasLiveBridgeWithID(userID, bridgeID) {
-			shouldNotifyDisconnected = false
-		}
-
-		if isCurrent {
-			phones := group.AllPhones()
-			for _, phone := range phones {
-				_ = phone.Conn.Write(ctx, websocket.MessageText, bridgeDisconnectedJSON)
-			}
-		}
+		// again on the user's current group: a same-id reconnect that lands
+		// right after this teardown must not be marked offline in the auth
+		// server after its connected notification. This checks the manager's
+		// current registration, not this handler's own (possibly stale) group.
+		shouldNotifyDisconnected := isCurrent && !manager.HasLiveBridgeWithID(userID, bridgeID)
 
 		if shouldNotifyDisconnected && notificationsClient != nil {
 			disconnectedAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -377,26 +362,19 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		connID := binary.BigEndian.Uint16(data[:2])
 		payload := data[2:]
 
-		// Enforce the single-active-bridge invariant on every frame: a bridge
-		// displaced by a newer connection for this account must not relay to
-		// phones, even for frames it had already queued/read before its close
-		// completes. The current-bridge check is folded into the same locked
-		// target selection (PhonesIfCurrentBridge / PhoneIfCurrentBridge), so a
-		// bridge displaced before it routes a frame gets no targets — without
-		// relying on the displaced connection's close/cancel racing the read
-		// loop. The lock is not held across the writes below (that would
-		// serialize all relay traffic on socket I/O), so a bridge displaced in
-		// the microseconds between snapshot and write can still deliver the one
-		// frame it is mid-routing; that frame was read while it was the active
-		// bridge, so its late arrival during handover is benign.
+		// A bridge reaches only the phones whose effective target it is, even
+		// with a known connId, and a connection displaced by a same-id
+		// reconnect reaches none — checked under the group lock on every frame
+		// rather than relying on the displaced connection's close/cancel racing
+		// the read loop (see PhonesTargeting for the residual window).
 		if connID == 0 {
-			for _, target := range group.PhonesIfCurrentBridge(newConn) {
+			for _, target := range group.PhonesTargeting(newConn) {
 				_ = target.Conn.Write(ctx, websocket.MessageBinary, payload)
 			}
 			continue
 		}
 
-		target := group.PhoneIfCurrentBridge(newConn, connID)
+		target := group.PhoneTargeting(newConn, connID)
 		if target == nil {
 			continue
 		}
@@ -404,47 +382,24 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 	}
 }
 
-func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup, manager *GroupManager, userID string, notificationsClient *notifications.Client) {
-	var (
-		connID     uint16
-		bridgeConn *Connection
-		connCtx    context.Context
-		connCancel context.CancelFunc
-		phoneConn  *Connection
-	)
-
-	for {
-		id := group.AssignConnID()
-		group.mu.Lock()
-		if len(group.Phones) >= maxPhonesPerAccount {
-			group.mu.Unlock()
-			_ = conn.Close(websocket.StatusCode(protocol.CloseAccountFull), "account full")
-			return
-		}
-		if _, exists := group.Phones[id]; exists {
-			group.mu.Unlock()
-			continue
-		}
-
-		connCtx, connCancel = context.WithCancel(ctx)
-		phoneConn = &Connection{Conn: conn, ConnID: id, Cancel: connCancel}
-		group.Phones[id] = phoneConn
-		bridgeConn = group.Bridge
-		connID = id
-		group.mu.Unlock()
-		break
+// handlePhone serves one phone. pinnedBridgeID is the bridge the phone named
+// at auth; empty means it follows the account's default bridge.
+func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup, manager *GroupManager, userID, pinnedBridgeID string, notificationsClient *notifications.Client) {
+	connCtx, connCancel := context.WithCancel(ctx)
+	phoneConn := &Connection{Conn: conn, Cancel: connCancel, BridgeID: pinnedBridgeID}
+	bridgeConn, ok := group.AddPhone(phoneConn)
+	if !ok {
+		connCancel()
+		_ = conn.Close(websocket.StatusCode(protocol.CloseAccountFull), "account full")
+		return
 	}
+	connID := phoneConn.ConnID
 
 	startPingLoop(connCtx, connCancel, conn)
 	reportControl := newControlReportSender(connCtx, notificationsClient)
 
 	if bridgeConn != nil {
-		phoneConnMsg, err := json.Marshal(protocol.PhoneConnectedMessage{Type: protocol.TypePhoneConnected, ConnID: connID})
-		if err != nil {
-			slog.Error("failed to marshal phone_connected", "err", err)
-			return
-		}
-		_ = bridgeConn.Conn.Write(ctx, websocket.MessageText, phoneConnMsg)
+		notifyBridgeOfPhone(ctx, bridgeConn, protocol.PhoneConnectedMessage{Type: protocol.TypePhoneConnected, ConnID: connID})
 		_ = conn.Write(ctx, websocket.MessageText, bridgeConnectedJSON)
 	} else {
 		_ = conn.Write(ctx, websocket.MessageText, bridgeDisconnectedJSON)
@@ -452,18 +407,8 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 
 	defer func() {
 		connCancel()
-		group.mu.Lock()
-		delete(group.Phones, connID)
-		bridge := group.Bridge
-		group.mu.Unlock()
-
-		if bridge != nil {
-			phoneDisconnMsg, err := json.Marshal(protocol.PhoneDisconnectedMessage{Type: protocol.TypePhoneDisconnected, ConnID: connID})
-			if err != nil {
-				slog.Error("failed to marshal phone_disconnected", "err", err)
-				return
-			}
-			_ = bridge.Conn.Write(ctx, websocket.MessageText, phoneDisconnMsg)
+		if bridge := group.RemovePhone(phoneConn); bridge != nil {
+			notifyBridgeOfPhone(ctx, bridge, protocol.PhoneDisconnectedMessage{Type: protocol.TypePhoneDisconnected, ConnID: connID})
 		}
 		manager.RemoveGroupIfEmpty(userID, group)
 	}()
@@ -479,7 +424,7 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 			if err := json.Unmarshal(data, &message); err != nil || message.Type != protocol.TypeBridgeConnectionObserved || !deviceIDRegexp.MatchString(message.DeviceID) {
 				continue
 			}
-			bridge := group.BridgeForCurrentPhone(phoneConn)
+			bridge := group.BridgeForPhone(phoneConn)
 			if bridge == nil || bridge.ConnectionID == "" || notificationsClient == nil {
 				continue
 			}
@@ -491,9 +436,7 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 			continue
 		}
 
-		group.mu.Lock()
-		bridge := group.Bridge
-		group.mu.Unlock()
+		bridge := group.BridgeForPhone(phoneConn)
 		if bridge == nil {
 			continue
 		}
@@ -503,6 +446,36 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 		copy(framed[2:], data)
 		_ = bridge.Conn.Write(ctx, websocket.MessageBinary, framed)
 	}
+}
+
+// announceTargetChanges tells each re-targeted phone and the bridges involved,
+// in order: phone_disconnected to the previous bridge (if still connected),
+// then the phone's notice, then phone_connected to the new bridge. A phone
+// that moves to another bridge gets bridge_connected only — never
+// bridge_disconnected first, which would flash the offline state — and re-keys
+// with its new bridge on that notice.
+func announceTargetChanges(ctx context.Context, changes []targetChange) {
+	for _, change := range changes {
+		connID := change.phone.ConnID
+		if change.previous != nil {
+			notifyBridgeOfPhone(ctx, change.previous, protocol.PhoneDisconnectedMessage{Type: protocol.TypePhoneDisconnected, ConnID: connID})
+		}
+		if change.next == nil {
+			_ = change.phone.Conn.Write(ctx, websocket.MessageText, bridgeDisconnectedJSON)
+			continue
+		}
+		_ = change.phone.Conn.Write(ctx, websocket.MessageText, bridgeConnectedJSON)
+		notifyBridgeOfPhone(ctx, change.next, protocol.PhoneConnectedMessage{Type: protocol.TypePhoneConnected, ConnID: connID})
+	}
+}
+
+func notifyBridgeOfPhone(ctx context.Context, bridge *Connection, message any) {
+	data, err := json.Marshal(message)
+	if err != nil {
+		slog.Error("failed to marshal phone notice", "err", err)
+		return
+	}
+	_ = bridge.Conn.Write(ctx, websocket.MessageText, data)
 }
 
 // One sender and one pending latest-value report per socket. The socket read

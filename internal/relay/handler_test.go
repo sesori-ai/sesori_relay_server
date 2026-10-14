@@ -274,12 +274,19 @@ func (e *testEnv) connectBridgeNoID(t *testing.T, userID string) *websocket.Conn
 
 func (e *testEnv) connectPhone(t *testing.T, userID string) (*websocket.Conn, []byte) {
 	t.Helper()
+	return e.connectPhoneWithBridgeID(t, userID, "")
+}
+
+// connectPhoneWithBridgeID connects a phone pinned to bridgeID; an empty id is
+// an older app that names no bridge.
+func (e *testEnv) connectPhoneWithBridgeID(t *testing.T, userID, bridgeID string) (*websocket.Conn, []byte) {
+	t.Helper()
 	ctx := context.Background()
 	conn, err := e.dial(ctx)
 	if err != nil {
 		t.Fatalf("dial phone: %v", err)
 	}
-	if err := sendAuth(ctx, conn, e.makeToken(userID), "phone", ""); err != nil {
+	if err := sendAuth(ctx, conn, e.makeToken(userID), "phone", bridgeID); err != nil {
 		conn.CloseNow()
 		t.Fatalf("sendAuth phone: %v", err)
 	}
@@ -483,9 +490,8 @@ func TestHandler_DisplacedBridgeDoesNotRelayToPhones(t *testing.T) {
 	defer phone.CloseNow()
 	readTextMsg(t, bridge1, 2*time.Second) // phone_connected on bridge1
 
-	// Displace bridge1. Immediately try to relay a frame from the now-stale
-	// bridge before it has observed its close. (bridge2 receives no
-	// phone_connected: the phone was already connected before the replacement.)
+	// Displace bridge1 with a same-id reconnect. Immediately try to relay a
+	// frame from the now-stale connection before it has observed its close.
 	bridge2 := env.connectBridge(t, "user1")
 	defer bridge2.CloseNow()
 
@@ -758,16 +764,13 @@ func TestHandler_BridgeID_StoredOnConnection(t *testing.T) {
 
 	g := env.relay.manager.GetOrCreateGroup("user1")
 	g.mu.Lock()
-	bridgeID := ""
-	if g.Bridge != nil {
-		bridgeID = g.Bridge.BridgeID
-	}
+	registered := g.Bridges["br_abc12345"]
 	g.mu.Unlock()
-	if bridgeID == "" {
-		t.Fatal("expected bridge to be set on group")
+	if registered == nil {
+		t.Fatal("expected bridge to be registered under its bridgeId")
 	}
-	if bridgeID != "br_abc12345" {
-		t.Errorf("expected bridgeId br_abc12345 on connection, got %q", bridgeID)
+	if registered.BridgeID != "br_abc12345" {
+		t.Errorf("expected bridgeId br_abc12345 on connection, got %q", registered.BridgeID)
 	}
 }
 
@@ -859,26 +862,23 @@ func TestHandler_BridgeAuth_RejectsShortBridgeID(t *testing.T) {
 	expectClose(t, bridge, websocket.StatusCode(protocol.CloseAuthFailure))
 }
 
-func TestHandler_PhoneAuth_IgnoresStrayBridgeID(t *testing.T) {
+func TestHandler_PhoneAuth_RejectsInvalidBridgeID(t *testing.T) {
 	env := newTestEnv(t)
 
-	ctx := context.Background()
-	conn, err := env.dial(ctx)
-	if err != nil {
-		t.Fatalf("dial phone: %v", err)
+	for _, bridgeID := range []string{"not-a-valid-bridge-id", "br_short"} {
+		ctx := context.Background()
+		conn, err := env.dial(ctx)
+		if err != nil {
+			t.Fatalf("dial phone: %v", err)
+		}
+		if err := sendAuth(ctx, conn, env.makeToken("user1"), "phone", bridgeID); err != nil {
+			t.Fatalf("sendAuth: %v", err)
+		}
+		expectClose(t, conn, websocket.StatusCode(protocol.CloseAuthFailure))
+		conn.CloseNow()
 	}
-	defer conn.CloseNow()
-
-	token := env.makeToken("user1")
-	msg := fmt.Sprintf(`{"type":"auth","token":"%s","role":"phone","bridgeId":"br_strayValue"}`, token)
-	if err := conn.Write(ctx, websocket.MessageText, []byte(msg)); err != nil {
-		t.Fatalf("sendAuth: %v", err)
-	}
-
-	firstMsg := readTextMsg(t, conn, 2*time.Second)
-	m := parseJSON(t, firstMsg)
-	if m["type"] != "bridge_disconnected" {
-		t.Errorf("phone should be accepted; expected bridge_disconnected, got %q", m["type"])
+	if env.relay.manager.Count() != 0 {
+		t.Errorf("expected 0 groups (rejected), got %d", env.relay.manager.Count())
 	}
 }
 
@@ -1113,7 +1113,7 @@ func TestHandler_BridgeDisconnectPolicyPreservesAwakeEligibility(t *testing.T) {
 	}
 }
 
-func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing.T) {
+func TestHandler_StatusReports_PerBridge(t *testing.T) {
 	const secret = "test-relay-secret"
 
 	type captured struct {
@@ -1130,6 +1130,12 @@ func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing
 		case <-time.After(2 * time.Second):
 			t.Fatalf("timed out waiting for %s notification", label)
 			return captured{}
+		}
+	}
+	expectCaptured := func(label, bridgeID, status string) {
+		t.Helper()
+		if event := readCaptured(label); event.bridgeID != bridgeID || event.status != status {
+			t.Fatalf("%s: got %+v, want %s %s", label, event, bridgeID, status)
 		}
 	}
 	notifServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1150,52 +1156,31 @@ func TestHandler_BridgeReplacement_MarksDistinctOldBridgeDisconnected(t *testing
 
 	notif := notifications.NewClient(notifServer.URL, secret)
 	env := newTestEnv(t, testEnvOpts{notificationsClient: notif})
-	oldBridge := env.connectBridgeWithID(t, "user1", "br_oldBridge01")
 
-	first := readCaptured("old bridge connected")
-	if first.bridgeID != "br_oldBridge01" || first.status != notifications.BridgeStatusConnected {
-		t.Fatalf("expected old bridge connected event, got %+v", first)
-	}
+	// A second computer connects alongside the first: only connected reports.
+	first := env.connectBridgeWithID(t, "user1", "br_firstBridge1")
+	defer first.CloseNow()
+	expectCaptured("first connected", "br_firstBridge1", notifications.BridgeStatusConnected)
+	second := env.connectBridgeWithID(t, "user1", "br_secondBridge")
+	defer second.CloseNow()
+	expectCaptured("second connected", "br_secondBridge", notifications.BridgeStatusConnected)
 
-	newBridge := env.connectBridgeWithID(t, "user1", "br_newBridge01")
-	defer newBridge.CloseNow()
-	defer oldBridge.CloseNow()
+	// The second computer reconnects with its id: the displaced connection's
+	// teardown reports nothing, so the bridge never reads as offline.
+	replacement := env.connectBridgeWithID(t, "user1", "br_secondBridge")
+	defer replacement.CloseNow()
+	expectClose(t, second, websocket.StatusCode(protocol.CloseBridgeReplaced))
+	expectCaptured("second reconnected", "br_secondBridge", notifications.BridgeStatusConnected)
 
-	// A real displaced bridge keeps reading, so it observes and replies to the
-	// server's CloseBridgeReplaced frame, completing the close handshake
-	// promptly (which then unblocks the old connection's teardown). Drain the
-	// old bridge here so the server's close does not sit out its full
-	// handshake-wait timeout waiting on an unresponsive peer.
-	go func() {
-		for {
-			if _, _, err := oldBridge.Read(context.Background()); err != nil {
-				return
-			}
-		}
-	}()
-
-	replacementEvents := []captured{
-		readCaptured("new bridge connected or old bridge disconnected"),
-		readCaptured("new bridge connected or old bridge disconnected"),
-	}
-	seenNewConnected := false
-	seenOldDisconnected := false
-	for _, event := range replacementEvents {
-		if event.bridgeID == "br_newBridge01" && event.status == notifications.BridgeStatusConnected {
-			seenNewConnected = true
-		}
-		if event.bridgeID == "br_oldBridge01" && event.status == notifications.BridgeStatusDisconnected {
-			seenOldDisconnected = true
-		}
-	}
-	if !seenNewConnected || !seenOldDisconnected {
-		t.Fatalf("expected new connected and old disconnected events, got %+v", replacementEvents)
-	}
-
-	newBridge.CloseNow()
-	fourth := readCaptured("new bridge disconnected")
-	if fourth.bridgeID != "br_newBridge01" || fourth.status != notifications.BridgeStatusDisconnected {
-		t.Fatalf("expected new bridge disconnected event, got %+v", fourth)
+	// Each computer's disconnect is reported for its own id.
+	first.CloseNow()
+	expectCaptured("first disconnected", "br_firstBridge1", notifications.BridgeStatusDisconnected)
+	replacement.CloseNow()
+	expectCaptured("second disconnected", "br_secondBridge", notifications.BridgeStatusDisconnected)
+	select {
+	case event := <-capturedCh:
+		t.Fatalf("unexpected extra report %+v", event)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 
@@ -1269,4 +1254,231 @@ func TestHandler_BridgeRevoked_ConnectReportTransportError_FailOpen(t *testing.T
 		t.Fatalf("expected bridge to stay connected on transport error, got %d groups", env.relay.manager.Count())
 	}
 	expectOpen(t, conn, 300*time.Millisecond)
+}
+
+// --- multi-bridge routing: two computers, pinned and unpinned phones ---
+
+// expectNotice reads one text frame and asserts its type, returning the
+// decoded message.
+func expectNotice(t *testing.T, conn *websocket.Conn, wantType string) map[string]interface{} {
+	t.Helper()
+	message := parseJSON(t, readTextMsg(t, conn, 2*time.Second))
+	if message["type"] != wantType {
+		t.Fatalf("expected %s, got %v", wantType, message)
+	}
+	return message
+}
+
+// expectPhoneNotice reads a phone_connected/phone_disconnected notice and
+// asserts it names connID.
+func expectPhoneNotice(t *testing.T, bridge *websocket.Conn, wantType string, connID uint16) {
+	t.Helper()
+	message := expectNotice(t, bridge, wantType)
+	if got := uint16(message["connId"].(float64)); got != connID {
+		t.Fatalf("%s connId = %d, want %d", wantType, got, connID)
+	}
+}
+
+// collectMessages reads conn in the background without a deadline (a read
+// deadline would close the socket and notify its peers) and returns
+// everything it received within settle. A connection that closed during the
+// window is recorded as a "read error: ..." entry, so a silence assertion
+// fails instead of mistaking the close for silence. The collector has no
+// deadline of its own; the test's deferred CloseNow ends it after the result
+// was taken.
+func collectMessages(conns ...*websocket.Conn) func(settle time.Duration) [][]string {
+	received := make([]chan string, len(conns))
+	for i, conn := range conns {
+		received[i] = make(chan string, 16)
+		go func(conn *websocket.Conn, out chan<- string) {
+			for {
+				_, data, err := conn.Read(context.Background())
+				if err != nil {
+					out <- "read error: " + err.Error()
+					return
+				}
+				out <- string(data)
+			}
+		}(conn, received[i])
+	}
+	return func(settle time.Duration) [][]string {
+		time.Sleep(settle)
+		result := make([][]string, len(received))
+		for i, ch := range received {
+			for len(ch) > 0 {
+				result[i] = append(result[i], <-ch)
+			}
+		}
+		return result
+	}
+}
+
+func phoneConnID(t *testing.T, bridge *websocket.Conn) uint16 {
+	t.Helper()
+	return uint16(expectNotice(t, bridge, protocol.TypePhoneConnected)["connId"].(float64))
+}
+
+func writeFrame(t *testing.T, conn *websocket.Conn, connID uint16, payload string) {
+	t.Helper()
+	frame := make([]byte, 2+len(payload))
+	binary.BigEndian.PutUint16(frame[:2], connID)
+	copy(frame[2:], payload)
+	if err := conn.Write(context.Background(), websocket.MessageBinary, frame); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+}
+
+func TestHandler_TwoBridges_FramesNeverCrossBridges(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	first := env.connectBridgeWithID(t, "user1", "br_firstBridge1")
+	defer first.CloseNow()
+	second := env.connectBridgeWithID(t, "user1", "br_secondBridge")
+	defer second.CloseNow()
+
+	// An older app names no bridge and lands on the most recent computer.
+	oldApp, firstMsg := env.connectPhone(t, "user1")
+	defer oldApp.CloseNow()
+	if m := parseJSON(t, firstMsg); m["type"] != protocol.TypeBridgeConnected {
+		t.Fatalf("old app expected bridge_connected, got %v", m)
+	}
+	oldAppID := phoneConnID(t, second)
+
+	pinned, firstMsg := env.connectPhoneWithBridgeID(t, "user1", "br_firstBridge1")
+	defer pinned.CloseNow()
+	if m := parseJSON(t, firstMsg); m["type"] != protocol.TypeBridgeConnected {
+		t.Fatalf("pinned phone expected bridge_connected, got %v", m)
+	}
+	pinnedID := phoneConnID(t, first)
+
+	// Phone -> bridge frames reach only the phone's target.
+	if err := oldApp.Write(ctx, websocket.MessageBinary, []byte("to-second")); err != nil {
+		t.Fatalf("old app write: %v", err)
+	}
+	if got := readBinaryMsg(t, second, 2*time.Second); binary.BigEndian.Uint16(got[:2]) != oldAppID || string(got[2:]) != "to-second" {
+		t.Errorf("second bridge got %q, want old app frame", got)
+	}
+	if err := pinned.Write(ctx, websocket.MessageBinary, []byte("to-first")); err != nil {
+		t.Fatalf("pinned write: %v", err)
+	}
+	if got := readBinaryMsg(t, first, 2*time.Second); binary.BigEndian.Uint16(got[:2]) != pinnedID || string(got[2:]) != "to-first" {
+		t.Errorf("first bridge got %q, want pinned phone frame", got)
+	}
+
+	received := collectMessages(pinned, oldApp, first, second)
+	// A bridge cannot reach another bridge's phone, even with its connId.
+	writeFrame(t, first, oldAppID, "cross-unicast")
+	writeFrame(t, second, pinnedID, "cross-unicast")
+	// Broadcasts reach only each bridge's own phones.
+	writeFrame(t, first, 0, "first-broadcast")
+	writeFrame(t, second, 0, "second-broadcast")
+	want := [][]string{{"first-broadcast"}, {"second-broadcast"}, nil, nil}
+	if got := received(300 * time.Millisecond); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("received [pinned oldApp first second] = %q, want %q", got, want)
+	}
+}
+
+func TestHandler_DefaultChange_RetargetsUnpinnedPhones(t *testing.T) {
+	env := newTestEnv(t)
+
+	first := env.connectBridgeWithID(t, "user1", "br_firstBridge1")
+	defer first.CloseNow()
+	unpinned, _ := env.connectPhone(t, "user1")
+	defer unpinned.CloseNow()
+	unpinnedID := phoneConnID(t, first)
+	pinned, _ := env.connectPhoneWithBridgeID(t, "user1", "br_firstBridge1")
+	defer pinned.CloseNow()
+	phoneConnID(t, first)
+
+	// A newer computer becomes the default: the unpinned phone moves with the
+	// replacement sequence (no bridge_disconnected); the pinned one stays.
+	second := env.connectBridgeWithID(t, "user1", "br_secondBridge")
+	defer second.CloseNow()
+	expectPhoneNotice(t, first, protocol.TypePhoneDisconnected, unpinnedID)
+	expectNotice(t, unpinned, protocol.TypeBridgeConnected)
+	expectPhoneNotice(t, second, protocol.TypePhoneConnected, unpinnedID)
+
+	// The default leaves while another computer remains: the unpinned phone
+	// moves back with bridge_connected only.
+	second.CloseNow()
+	expectNotice(t, unpinned, protocol.TypeBridgeConnected)
+	expectPhoneNotice(t, first, protocol.TypePhoneConnected, unpinnedID)
+
+	// No computer remains: both phones learn the bridge is gone.
+	first.CloseNow()
+	expectNotice(t, unpinned, protocol.TypeBridgeDisconnected)
+	expectNotice(t, pinned, protocol.TypeBridgeDisconnected)
+	expectNoMsg(t, unpinned, 200*time.Millisecond)
+	expectNoMsg(t, pinned, 200*time.Millisecond)
+}
+
+func TestHandler_PinnedPhone_WaitsForItsBridge(t *testing.T) {
+	env := newTestEnv(t)
+
+	other := env.connectBridgeWithID(t, "user1", "br_otherBridge1")
+	defer other.CloseNow()
+	pinned, firstMsg := env.connectPhoneWithBridgeID(t, "user1", "br_pinnedBridge")
+	defer pinned.CloseNow()
+	if m := parseJSON(t, firstMsg); m["type"] != protocol.TypeBridgeDisconnected {
+		t.Fatalf("phone pinned to an offline bridge expected bridge_disconnected, got %v", m)
+	}
+
+	// Another computer connecting does not concern the pinned phone.
+	another := env.connectBridgeWithID(t, "user1", "br_anotherBridg")
+	defer another.CloseNow()
+
+	target := env.connectBridgeWithID(t, "user1", "br_pinnedBridge")
+	defer target.CloseNow()
+	expectNotice(t, pinned, protocol.TypeBridgeConnected)
+	pinnedID := phoneConnID(t, target)
+
+	if err := pinned.Write(context.Background(), websocket.MessageBinary, []byte("hello")); err != nil {
+		t.Fatalf("pinned write: %v", err)
+	}
+	if got := readBinaryMsg(t, target, 2*time.Second); binary.BigEndian.Uint16(got[:2]) != pinnedID {
+		t.Errorf("pinned bridge got %q from the wrong connId", got)
+	}
+	expectNoMsg(t, other, 200*time.Millisecond)
+	expectNoMsg(t, another, 200*time.Millisecond)
+}
+
+func TestHandler_SameIDReconnect_NoDisconnectNoise(t *testing.T) {
+	env := newTestEnv(t)
+
+	old := env.connectBridgeWithID(t, "user1", "br_sameBridge01")
+	defer old.CloseNow()
+	phone, _ := env.connectPhone(t, "user1")
+	defer phone.CloseNow()
+	phoneID := phoneConnID(t, old)
+
+	replacement := env.connectBridgeWithID(t, "user1", "br_sameBridge01")
+	defer replacement.CloseNow()
+	// Reading the close completes the handshake, so the displaced connection's
+	// teardown runs before the assertions below.
+	expectClose(t, old, websocket.StatusCode(protocol.CloseBridgeReplaced))
+	expectNotice(t, phone, protocol.TypeBridgeConnected)
+	expectPhoneNotice(t, replacement, protocol.TypePhoneConnected, phoneID)
+	if got := collectMessages(phone, replacement)(300 * time.Millisecond); fmt.Sprint(got) != fmt.Sprint([][]string{nil, nil}) {
+		t.Errorf("unexpected messages after same-id reconnect: %q", got)
+	}
+}
+
+func TestHandler_BridgeCap(t *testing.T) {
+	env := newTestEnv(t)
+
+	bridges := make([]*websocket.Conn, maxBridgesPerAccount)
+	for i := range bridges {
+		bridges[i] = env.connectBridgeWithID(t, "user1", fmt.Sprintf("br_capBridge%03d", i))
+		defer bridges[i].CloseNow()
+	}
+
+	extra := env.connectBridgeWithID(t, "user1", "br_capBridgeXtra")
+	defer extra.CloseNow()
+	expectClose(t, extra, websocket.StatusCode(protocol.CloseAccountFull))
+
+	// The same computer reconnecting at the cap still replaces itself.
+	again := env.connectBridgeWithID(t, "user1", "br_capBridge000")
+	defer again.CloseNow()
+	expectClose(t, bridges[0], websocket.StatusCode(protocol.CloseBridgeReplaced))
 }
