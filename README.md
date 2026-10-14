@@ -10,7 +10,7 @@ The relay routes traffic by account — connections are grouped by the `userId` 
 2. Phone connects to `/ws` and sends an auth message with a signed JWT, role `"phone"`, and optionally the `bridgeId` it wants to talk to
 3. Relay extracts `userId` from each JWT and groups connections by account — up to 10 bridges + up to 5 phones per account. Each phone talks to its pinned bridge, or to the most recently connected bridge when it names none
 4. Binary frames from phone → relay → bridge carry a 2-byte `connId` prefix so the bridge can address replies back to the correct phone
-5. Control messages notify each side when the other connects or disconnects (`bridge_connected`, `bridge_disconnected`, `phone_connected`, `phone_disconnected`)
+5. Control messages notify each side when the other connects or disconnects (`bridge_connected`, `bridge_disconnected`, `phone_connected`, `phone_disconnected`), and tell every phone when any of the account's bridges goes online or offline (`bridge_presence`)
 6. Group is torn down when all connections close — no state is persisted
 
 ## Architecture
@@ -112,8 +112,9 @@ Roles: `"bridge"` or `"phone"`. The relay closes the connection if auth fails.
 |---------|-----------|-------------|
 | `phone_connected` | relay → bridge | A phone joined; includes `connId` (uint16) |
 | `phone_disconnected` | relay → bridge | A phone left; includes `connId` |
-| `bridge_connected` | relay → phone | The bridge is online |
-| `bridge_disconnected` | relay → phone | The bridge disconnected |
+| `bridge_connected` | relay → phone | The phone's target bridge is online, or the phone moved to another bridge; `bridgeId` names the new target |
+| `bridge_disconnected` | relay → phone | The phone has no target bridge; `bridgeId` names the bridge it lost (or its offline pinned bridge), omitted when it had none |
+| `bridge_presence` | relay → phone | Sent to every phone of the account when any of its bridges connects or disconnects: `{"type":"bridge_presence","bridgeId":"br_…","online":true}`. A connection displaced by a same-id reconnect sends no offline notice; the reconnect repeats online |
 | `bridge_connection_notification_policy` | bridge → relay | Advisory `normal`, `suppress`, or `conservative` connection-push policy; never changes routing |
 | `bridge_connection_observed` | phone → relay | Bounded device UUID proving that exact surface restored E2E connectivity; used only to suppress its pending online push |
 

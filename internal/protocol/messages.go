@@ -23,6 +23,7 @@ const (
 	TypePhoneDisconnected  = "phone_disconnected"
 	TypeBridgeConnected    = "bridge_connected"
 	TypeBridgeDisconnected = "bridge_disconnected"
+	TypeBridgePresence     = "bridge_presence"
 
 	// Connection roles
 	RoleBridge = "bridge"
@@ -75,14 +76,28 @@ type PhoneDisconnectedMessage struct {
 	ConnID uint16 `json:"connId"`
 }
 
-// BridgeConnectedMessage is sent by relay to phones when bridge is online.
+// BridgeConnectedMessage is sent by relay to a phone when its target bridge
+// (pinned, else the default) comes online or the phone moves to another bridge.
 type BridgeConnectedMessage struct {
-	Type string `json:"type"` // "bridge_connected"
+	Type     string `json:"type"`     // "bridge_connected"
+	BridgeID string `json:"bridgeId"` // the phone's new target bridge
 }
 
-// BridgeDisconnectedMessage is sent by relay to phones when bridge is offline.
+// BridgeDisconnectedMessage is sent by relay to a phone that has no target
+// bridge any more (or none when it connects).
 type BridgeDisconnectedMessage struct {
 	Type string `json:"type"` // "bridge_disconnected"
+	// BridgeID is the bridge the phone lost, or its offline pinned bridge when
+	// it connects; omitted for an unpinned phone that connects with no bridge.
+	BridgeID string `json:"bridgeId,omitempty"`
+}
+
+// BridgePresenceMessage is sent by relay to every phone of the account when
+// any of its bridges connects or disconnects, whatever the phone's target.
+type BridgePresenceMessage struct {
+	Type     string `json:"type"` // "bridge_presence"
+	BridgeID string `json:"bridgeId"`
+	Online   bool   `json:"online"`
 }
 
 // ReadyMessage - bridge sends this encrypted to phone as proof of correct key
