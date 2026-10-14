@@ -1281,7 +1281,11 @@ func expectPhoneNotice(t *testing.T, bridge *websocket.Conn, wantType string, co
 
 // collectMessages reads conn in the background without a deadline (a read
 // deadline would close the socket and notify its peers) and returns
-// everything it received within settle.
+// everything it received within settle. A connection that closed during the
+// window is recorded as a "read error: ..." entry, so a silence assertion
+// fails instead of mistaking the close for silence. The collector has no
+// deadline of its own; the test's deferred CloseNow ends it after the result
+// was taken.
 func collectMessages(conns ...*websocket.Conn) func(settle time.Duration) [][]string {
 	received := make([]chan string, len(conns))
 	for i, conn := range conns {
@@ -1290,6 +1294,7 @@ func collectMessages(conns ...*websocket.Conn) func(settle time.Duration) [][]st
 			for {
 				_, data, err := conn.Read(context.Background())
 				if err != nil {
+					out <- "read error: " + err.Error()
 					return
 				}
 				out <- string(data)

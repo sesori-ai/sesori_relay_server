@@ -19,7 +19,7 @@ The relay routes traffic by account — connections are grouped by the `userId` 
 Phone ←──(encrypted)──→ Relay Server ←──(encrypted)──→ Bridge CLI → opencode serve
 ```
 
-- **Account groups**: Connections are grouped by `userId` from the JWT. Each group holds up to 10 bridges (keyed by `bridgeId`; a reconnect with the same id replaces the previous connection with close code `4007`) + up to 5 phones.
+- **Account groups**: Connections are grouped by `userId` from the JWT. Each group holds up to 10 bridges (keyed by `bridgeId`; a reconnect with the same id replaces the previous connection, and the relay attempts to close it with code `4007`) + up to 5 phones.
 - **Rate limiting**: Max 20 connections per resolved client IP, max 10,000 active groups globally.
 - **No storage**: The relay holds no state beyond active WebSocket connections. Nothing is persisted.
 
@@ -128,7 +128,7 @@ status reporting retain their separate existing lifecycle behavior.
 
 ### Data frames (binary)
 
-Binary frames from phone → relay → bridge are prefixed with a 2-byte big-endian `connId`. The bridge uses this to address responses back to the correct phone. `connId == 0` is a broadcast from a bridge to all phones that talk to it; a bridge never reaches a phone that talks to another bridge.
+Binary frames from phone → relay → bridge are prefixed with a 2-byte big-endian `connId`. The bridge uses this to address responses back to the correct phone. `connId == 0` is a broadcast from a bridge to all phones that talk to it; routing checks each phone's target bridge under the account lock, though a frame already in flight can arrive just after that target changes.
 
 ### Encryption protocol
 
