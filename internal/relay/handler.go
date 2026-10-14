@@ -26,6 +26,10 @@ const (
 	maxPhonesPerAccount  = 5
 	maxBridgesPerAccount = 10
 	pingInterval         = 30 * time.Second
+	// controlWriteTimeout bounds each control-message write, so a peer that
+	// stopped reading cannot stall the handler fanning out notices (an expired
+	// write closes that peer's connection; it reconnects).
+	controlWriteTimeout  = 5 * time.Second
 	cfConnectingIPHeader = "CF-Connecting-IP"
 )
 
@@ -44,11 +48,6 @@ type clientIPInfo struct {
 
 var bridgeIDRegexp = regexp.MustCompile(`^br_[A-Za-z0-9_-]{8,32}$`)
 var deviceIDRegexp = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-
-var (
-	bridgeConnectedJSON, _    = json.Marshal(protocol.BridgeConnectedMessage{Type: protocol.TypeBridgeConnected})
-	bridgeDisconnectedJSON, _ = json.Marshal(protocol.BridgeDisconnectedMessage{Type: protocol.TypeBridgeDisconnected})
-)
 
 func resolveClientIP(r *http.Request, trustCFConnectingIP bool) clientIPInfo {
 	peerAddress := remoteIPAddress(r.RemoteAddr)
@@ -272,6 +271,9 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 	}
 
 	announceTargetChanges(ctx, changes)
+	// A same-id reconnect repeats online; that is harmless and keeps this
+	// unconditional.
+	announcePresence(ctx, group.AllPhones(), bridgeID, true)
 
 	if notificationsClient != nil {
 		connectedAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -307,12 +309,15 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		isCurrent, changes := group.RemoveBridge(newConn)
 		announceTargetChanges(ctx, changes)
 
-		// Suppress the disconnect notification if this bridgeId is already live
-		// again on the user's current group: a same-id reconnect that lands
-		// right after this teardown must not be marked offline in the auth
-		// server after its connected notification. This checks the manager's
-		// current registration, not this handler's own (possibly stale) group.
+		// Suppress the offline presence and disconnect notification if this
+		// bridgeId is already live again on the user's current group: a same-id
+		// reconnect that lands right after this teardown must not read as
+		// offline after its online notice. This checks the manager's current
+		// registration, not this handler's own (possibly stale) group.
 		shouldNotifyDisconnected := isCurrent && !manager.HasLiveBridgeWithID(userID, bridgeID)
+		if shouldNotifyDisconnected {
+			announcePresence(ctx, group.AllPhones(), bridgeID, false)
+		}
 
 		if shouldNotifyDisconnected && notificationsClient != nil {
 			disconnectedAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -399,16 +404,17 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 	reportControl := newControlReportSender(connCtx, notificationsClient)
 
 	if bridgeConn != nil {
-		notifyBridgeOfPhone(ctx, bridgeConn, protocol.PhoneConnectedMessage{Type: protocol.TypePhoneConnected, ConnID: connID})
-		_ = conn.Write(ctx, websocket.MessageText, bridgeConnectedJSON)
+		writeControl(ctx, bridgeConn, protocol.PhoneConnectedMessage{Type: protocol.TypePhoneConnected, ConnID: connID})
+		writeControl(ctx, phoneConn, protocol.BridgeConnectedMessage{Type: protocol.TypeBridgeConnected, BridgeID: bridgeConn.BridgeID})
 	} else {
-		_ = conn.Write(ctx, websocket.MessageText, bridgeDisconnectedJSON)
+		// A pinned phone learns which bridge it is waiting for.
+		writeControl(ctx, phoneConn, protocol.BridgeDisconnectedMessage{Type: protocol.TypeBridgeDisconnected, BridgeID: pinnedBridgeID})
 	}
 
 	defer func() {
 		connCancel()
 		if bridge := group.RemovePhone(phoneConn); bridge != nil {
-			notifyBridgeOfPhone(ctx, bridge, protocol.PhoneDisconnectedMessage{Type: protocol.TypePhoneDisconnected, ConnID: connID})
+			writeControl(ctx, bridge, protocol.PhoneDisconnectedMessage{Type: protocol.TypePhoneDisconnected, ConnID: connID})
 		}
 		manager.RemoveGroupIfEmpty(userID, group)
 	}()
@@ -458,24 +464,35 @@ func announceTargetChanges(ctx context.Context, changes []targetChange) {
 	for _, change := range changes {
 		connID := change.phone.ConnID
 		if change.previous != nil {
-			notifyBridgeOfPhone(ctx, change.previous, protocol.PhoneDisconnectedMessage{Type: protocol.TypePhoneDisconnected, ConnID: connID})
+			writeControl(ctx, change.previous, protocol.PhoneDisconnectedMessage{Type: protocol.TypePhoneDisconnected, ConnID: connID})
 		}
 		if change.next == nil {
-			_ = change.phone.Conn.Write(ctx, websocket.MessageText, bridgeDisconnectedJSON)
+			writeControl(ctx, change.phone, protocol.BridgeDisconnectedMessage{Type: protocol.TypeBridgeDisconnected, BridgeID: change.previousBridgeID})
 			continue
 		}
-		_ = change.phone.Conn.Write(ctx, websocket.MessageText, bridgeConnectedJSON)
-		notifyBridgeOfPhone(ctx, change.next, protocol.PhoneConnectedMessage{Type: protocol.TypePhoneConnected, ConnID: connID})
+		writeControl(ctx, change.phone, protocol.BridgeConnectedMessage{Type: protocol.TypeBridgeConnected, BridgeID: change.next.BridgeID})
+		writeControl(ctx, change.next, protocol.PhoneConnectedMessage{Type: protocol.TypePhoneConnected, ConnID: connID})
 	}
 }
 
-func notifyBridgeOfPhone(ctx context.Context, bridge *Connection, message any) {
+// announcePresence tells every phone of the account, whatever its target, that
+// bridgeID came online or went offline. Callers send it after
+// announceTargetChanges, so a re-targeted phone gets its connect notice first.
+func announcePresence(ctx context.Context, phones []*Connection, bridgeID string, online bool) {
+	for _, phone := range phones {
+		writeControl(ctx, phone, protocol.BridgePresenceMessage{Type: protocol.TypeBridgePresence, BridgeID: bridgeID, Online: online})
+	}
+}
+
+func writeControl(ctx context.Context, conn *Connection, message any) {
 	data, err := json.Marshal(message)
 	if err != nil {
-		slog.Error("failed to marshal phone notice", "err", err)
+		slog.Error("failed to marshal control message", "err", err)
 		return
 	}
-	_ = bridge.Conn.Write(ctx, websocket.MessageText, data)
+	writeCtx, cancel := context.WithTimeout(ctx, controlWriteTimeout)
+	defer cancel()
+	_ = conn.Conn.Write(writeCtx, websocket.MessageText, data)
 }
 
 // One sender and one pending latest-value report per socket. The socket read

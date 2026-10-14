@@ -35,11 +35,14 @@ type AccountGroup struct {
 
 // targetChange is a phone whose effective target bridge changed. previous is
 // the old target only while it is still connected (it must learn that the
-// phone left); next is nil when the phone has no bridge any more.
+// phone left); previousBridgeID names the old target even when it is gone
+// (empty when the phone had none); next is nil when the phone has no bridge
+// any more.
 type targetChange struct {
-	phone    *Connection
-	previous *Connection
-	next     *Connection
+	phone            *Connection
+	previous         *Connection
+	previousBridgeID string
+	next             *Connection
 }
 
 func NewAccountGroup(userID string) *AccountGroup {
@@ -96,10 +99,14 @@ func (g *AccountGroup) changeBridgesLocked(mutate func()) []targetChange {
 		if next == previous {
 			continue
 		}
-		if previous != nil && g.Bridges[previous.BridgeID] != previous {
-			previous = nil
+		change := targetChange{phone: phone, previous: previous, next: next}
+		if previous != nil {
+			change.previousBridgeID = previous.BridgeID
+			if g.Bridges[previous.BridgeID] != previous {
+				change.previous = nil
+			}
 		}
-		changes = append(changes, targetChange{phone: phone, previous: previous, next: next})
+		changes = append(changes, change)
 	}
 	return changes
 }
@@ -176,6 +183,17 @@ func (g *AccountGroup) PhoneTargeting(bridge *Connection, connID uint16) *Connec
 		return nil
 	}
 	return phone
+}
+
+// AllPhones snapshots every phone in the group, whatever its target.
+func (g *AccountGroup) AllPhones() []*Connection {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	phones := make([]*Connection, 0, len(g.Phones))
+	for _, phone := range g.Phones {
+		phones = append(phones, phone)
+	}
+	return phones
 }
 
 // AddPhone assigns phone a free connId and registers it, unless the account is

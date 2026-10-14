@@ -27,7 +27,7 @@ internal/
 | Task | Location | Notes |
 |------|----------|-------|
 | Change auth/JWT | `internal/auth/` | RS256 verification, claims in authenticator.go |
-| Modify protocol messages | `internal/protocol/messages.go` | JSON control messages (bridge/phone connected/disconnected) |
+| Modify protocol messages | `internal/protocol/messages.go` | JSON control messages (bridge/phone connected/disconnected, bridge_presence) |
 | Change binary framing | `internal/protocol/framing.go` | 2-byte connId prefix on binary frames |
 | Adjust rate limits | `internal/relay/rate_limiter.go` | Per-IP (20) and global group (10,000) caps |
 | Add endpoints | `internal/relay/server.go` | HTTP mux, currently /health and /ws |

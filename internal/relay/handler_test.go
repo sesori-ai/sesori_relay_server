@@ -502,14 +502,12 @@ func TestHandler_DisplacedBridgeDoesNotRelayToPhones(t *testing.T) {
 	_ = bridge1.Write(ctx, websocket.MessageBinary, frame)
 
 	// The phone legitimately receives a bridge_connected text notice for the
-	// new bridge. Assert exactly that (a text frame, not the stale binary one):
-	// if the guard failed, this read would instead surface the binary payload.
-	notice := readTextMsg(t, phone, 2*time.Second)
-	nm := parseJSON(t, notice)
-	if nm["type"] != "bridge_connected" {
-		t.Errorf("phone expected bridge_connected, got %q", nm["type"])
-	}
-	// And no stale binary frame follows it.
+	// new bridge and its (repeated) online presence. Assert exactly that (text
+	// frames, not the stale binary one): if the guard failed, these reads would
+	// instead surface the binary payload.
+	expectText(t, phone, connectedNotice("br_defaultTest01"))
+	expectText(t, phone, presenceNotice("br_defaultTest01", true))
+	// And no stale binary frame follows them.
 	expectNoMsg(t, phone, 500*time.Millisecond)
 }
 
@@ -519,9 +517,9 @@ func TestHandler_PhoneNoBridge(t *testing.T) {
 	phone, firstMsg := env.connectPhone(t, "user1")
 	defer phone.CloseNow()
 
-	m := parseJSON(t, firstMsg)
-	if m["type"] != "bridge_disconnected" {
-		t.Errorf("expected bridge_disconnected, got %q", m["type"])
+	// An unpinned phone lost no bridge, so the notice names none.
+	if got := string(firstMsg); got != `{"type":"bridge_disconnected"}` {
+		t.Errorf("got %s, want a bridge_disconnected without bridgeId", got)
 	}
 }
 
@@ -534,9 +532,8 @@ func TestHandler_PhoneWithBridge(t *testing.T) {
 	phone, firstMsg := env.connectPhone(t, "user1")
 	defer phone.CloseNow()
 
-	m := parseJSON(t, firstMsg)
-	if m["type"] != "bridge_connected" {
-		t.Errorf("phone expected bridge_connected, got %q", m["type"])
+	if got, want := string(firstMsg), connectedNotice("br_defaultTest01"); got != want {
+		t.Errorf("got %s, want %s", got, want)
 	}
 
 	bridgeMsg := readTextMsg(t, bridge, 2*time.Second)
@@ -677,19 +674,15 @@ func TestHandler_BridgeDisconnect_NotifiesPhones(t *testing.T) {
 	phone, firstMsg := env.connectPhone(t, "user1")
 	defer phone.CloseNow()
 
-	m := parseJSON(t, firstMsg)
-	if m["type"] != "bridge_connected" {
-		t.Fatalf("phone expected bridge_connected, got %q", m["type"])
+	if got, want := string(firstMsg), connectedNotice("br_defaultTest01"); got != want {
+		t.Fatalf("got %s, want %s", got, want)
 	}
 	readTextMsg(t, bridge, 2*time.Second)
 
 	bridge.CloseNow()
 
-	phoneMsg := readTextMsg(t, phone, 3*time.Second)
-	pm := parseJSON(t, phoneMsg)
-	if pm["type"] != "bridge_disconnected" {
-		t.Errorf("expected bridge_disconnected, got %q", pm["type"])
-	}
+	expectText(t, phone, disconnectedNotice("br_defaultTest01"))
+	expectText(t, phone, presenceNotice("br_defaultTest01", false))
 }
 
 func TestHandler_PhoneDisconnect_NotifiesBridge(t *testing.T) {
@@ -1269,6 +1262,26 @@ func expectNotice(t *testing.T, conn *websocket.Conn, wantType string) map[strin
 	return message
 }
 
+// expectText reads one text frame and asserts its exact payload.
+func expectText(t *testing.T, conn *websocket.Conn, want string) {
+	t.Helper()
+	if got := string(readTextMsg(t, conn, 2*time.Second)); got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
+func connectedNotice(bridgeID string) string {
+	return `{"type":"bridge_connected","bridgeId":"` + bridgeID + `"}`
+}
+
+func disconnectedNotice(bridgeID string) string {
+	return `{"type":"bridge_disconnected","bridgeId":"` + bridgeID + `"}`
+}
+
+func presenceNotice(bridgeID string, online bool) string {
+	return fmt.Sprintf(`{"type":"bridge_presence","bridgeId":"%s","online":%t}`, bridgeID, online)
+}
+
 // expectPhoneNotice reads a phone_connected/phone_disconnected notice and
 // asserts it names connID.
 func expectPhoneNotice(t *testing.T, bridge *websocket.Conn, wantType string, connID uint16) {
@@ -1340,15 +1353,15 @@ func TestHandler_TwoBridges_FramesNeverCrossBridges(t *testing.T) {
 	// An older app names no bridge and lands on the most recent computer.
 	oldApp, firstMsg := env.connectPhone(t, "user1")
 	defer oldApp.CloseNow()
-	if m := parseJSON(t, firstMsg); m["type"] != protocol.TypeBridgeConnected {
-		t.Fatalf("old app expected bridge_connected, got %v", m)
+	if got, want := string(firstMsg), connectedNotice("br_secondBridge"); got != want {
+		t.Fatalf("old app got %s, want %s", got, want)
 	}
 	oldAppID := phoneConnID(t, second)
 
 	pinned, firstMsg := env.connectPhoneWithBridgeID(t, "user1", "br_firstBridge1")
 	defer pinned.CloseNow()
-	if m := parseJSON(t, firstMsg); m["type"] != protocol.TypeBridgeConnected {
-		t.Fatalf("pinned phone expected bridge_connected, got %v", m)
+	if got, want := string(firstMsg), connectedNotice("br_firstBridge1"); got != want {
+		t.Fatalf("pinned phone got %s, want %s", got, want)
 	}
 	pinnedID := phoneConnID(t, first)
 
@@ -1393,24 +1406,32 @@ func TestHandler_DefaultChange_RetargetsUnpinnedPhones(t *testing.T) {
 
 	// A newer computer becomes the default: the unpinned phone moves with the
 	// replacement sequence (no bridge_disconnected); the pinned one stays.
+	// Every phone, on either bridge, learns the new computer is online.
 	second := env.connectBridgeWithID(t, "user1", "br_secondBridge")
 	defer second.CloseNow()
 	expectPhoneNotice(t, first, protocol.TypePhoneDisconnected, unpinnedID)
-	expectNotice(t, unpinned, protocol.TypeBridgeConnected)
+	expectText(t, unpinned, connectedNotice("br_secondBridge"))
+	expectText(t, unpinned, presenceNotice("br_secondBridge", true))
+	expectText(t, pinned, presenceNotice("br_secondBridge", true))
 	expectPhoneNotice(t, second, protocol.TypePhoneConnected, unpinnedID)
 
 	// The default leaves while another computer remains: the unpinned phone
-	// moves back with bridge_connected only.
+	// moves back with bridge_connected only, and every phone sees it offline.
 	second.CloseNow()
-	expectNotice(t, unpinned, protocol.TypeBridgeConnected)
+	expectText(t, unpinned, connectedNotice("br_firstBridge1"))
+	expectText(t, unpinned, presenceNotice("br_secondBridge", false))
+	expectText(t, pinned, presenceNotice("br_secondBridge", false))
 	expectPhoneNotice(t, first, protocol.TypePhoneConnected, unpinnedID)
 
-	// No computer remains: both phones learn the bridge is gone.
+	// No computer remains: both phones learn the bridge they lost is gone.
 	first.CloseNow()
-	expectNotice(t, unpinned, protocol.TypeBridgeDisconnected)
-	expectNotice(t, pinned, protocol.TypeBridgeDisconnected)
-	expectNoMsg(t, unpinned, 200*time.Millisecond)
-	expectNoMsg(t, pinned, 200*time.Millisecond)
+	expectText(t, unpinned, disconnectedNotice("br_firstBridge1"))
+	expectText(t, unpinned, presenceNotice("br_firstBridge1", false))
+	expectText(t, pinned, disconnectedNotice("br_firstBridge1"))
+	expectText(t, pinned, presenceNotice("br_firstBridge1", false))
+	if got := collectMessages(unpinned, pinned)(200 * time.Millisecond); fmt.Sprint(got) != fmt.Sprint([][]string{nil, nil}) {
+		t.Errorf("unexpected extra messages: %q", got)
+	}
 }
 
 func TestHandler_PinnedPhone_WaitsForItsBridge(t *testing.T) {
@@ -1420,17 +1441,21 @@ func TestHandler_PinnedPhone_WaitsForItsBridge(t *testing.T) {
 	defer other.CloseNow()
 	pinned, firstMsg := env.connectPhoneWithBridgeID(t, "user1", "br_pinnedBridge")
 	defer pinned.CloseNow()
-	if m := parseJSON(t, firstMsg); m["type"] != protocol.TypeBridgeDisconnected {
-		t.Fatalf("phone pinned to an offline bridge expected bridge_disconnected, got %v", m)
+	// The phone learns which bridge it is waiting for.
+	if got, want := string(firstMsg), disconnectedNotice("br_pinnedBridge"); got != want {
+		t.Fatalf("phone pinned to an offline bridge got %s, want %s", got, want)
 	}
 
-	// Another computer connecting does not concern the pinned phone.
+	// Another computer connecting does not change the pinned phone's target;
+	// the phone only learns it is online.
 	another := env.connectBridgeWithID(t, "user1", "br_anotherBridg")
 	defer another.CloseNow()
+	expectText(t, pinned, presenceNotice("br_anotherBridg", true))
 
 	target := env.connectBridgeWithID(t, "user1", "br_pinnedBridge")
 	defer target.CloseNow()
-	expectNotice(t, pinned, protocol.TypeBridgeConnected)
+	expectText(t, pinned, connectedNotice("br_pinnedBridge"))
+	expectText(t, pinned, presenceNotice("br_pinnedBridge", true))
 	pinnedID := phoneConnID(t, target)
 
 	if err := pinned.Write(context.Background(), websocket.MessageBinary, []byte("hello")); err != nil {
@@ -1439,8 +1464,14 @@ func TestHandler_PinnedPhone_WaitsForItsBridge(t *testing.T) {
 	if got := readBinaryMsg(t, target, 2*time.Second); binary.BigEndian.Uint16(got[:2]) != pinnedID {
 		t.Errorf("pinned bridge got %q from the wrong connId", got)
 	}
-	expectNoMsg(t, other, 200*time.Millisecond)
-	expectNoMsg(t, another, 200*time.Millisecond)
+	if got := collectMessages(other, another)(200 * time.Millisecond); fmt.Sprint(got) != fmt.Sprint([][]string{nil, nil}) {
+		t.Errorf("other bridges received %q", got)
+	}
+
+	// Its bridge going offline names the bridge the phone lost.
+	target.CloseNow()
+	expectText(t, pinned, disconnectedNotice("br_pinnedBridge"))
+	expectText(t, pinned, presenceNotice("br_pinnedBridge", false))
 }
 
 func TestHandler_SameIDReconnect_NoDisconnectNoise(t *testing.T) {
@@ -1457,7 +1488,10 @@ func TestHandler_SameIDReconnect_NoDisconnectNoise(t *testing.T) {
 	// Reading the close completes the handshake, so the displaced connection's
 	// teardown runs before the assertions below.
 	expectClose(t, old, websocket.StatusCode(protocol.CloseBridgeReplaced))
-	expectNotice(t, phone, protocol.TypeBridgeConnected)
+	// The reconnect repeats online; the displaced connection's teardown adds
+	// neither bridge_disconnected nor offline presence.
+	expectText(t, phone, connectedNotice("br_sameBridge01"))
+	expectText(t, phone, presenceNotice("br_sameBridge01", true))
 	expectPhoneNotice(t, replacement, protocol.TypePhoneConnected, phoneID)
 	if got := collectMessages(phone, replacement)(300 * time.Millisecond); fmt.Sprint(got) != fmt.Sprint([][]string{nil, nil}) {
 		t.Errorf("unexpected messages after same-id reconnect: %q", got)
