@@ -26,6 +26,10 @@ const (
 	maxPhonesPerAccount  = 5
 	maxBridgesPerAccount = 10
 	pingInterval         = 30 * time.Second
+	// controlWriteTimeout bounds each control-message write, so a peer that
+	// stopped reading cannot stall the handler fanning out notices (an expired
+	// write closes that peer's connection; it reconnects).
+	controlWriteTimeout  = 5 * time.Second
 	cfConnectingIPHeader = "CF-Connecting-IP"
 )
 
@@ -486,7 +490,9 @@ func writeControl(ctx context.Context, conn *Connection, message any) {
 		slog.Error("failed to marshal control message", "err", err)
 		return
 	}
-	_ = conn.Conn.Write(ctx, websocket.MessageText, data)
+	writeCtx, cancel := context.WithTimeout(ctx, controlWriteTimeout)
+	defer cancel()
+	_ = conn.Conn.Write(writeCtx, websocket.MessageText, data)
 }
 
 // One sender and one pending latest-value report per socket. The socket read
