@@ -50,8 +50,8 @@ func (m *GroupManager) Count() int {
 }
 
 // HasLiveBridgeWithID reports whether the user's currently-registered group has
-// a live bridge with bridgeID. A displaced handler uses this before emitting a
-// stale BridgeStatusDisconnected: if a fresh connection already re-registered
+// a live bridge with bridgeID. A closing handler uses this before emitting
+// BridgeStatusDisconnected: if a fresh connection already re-registered
 // the same bridgeId (possibly in a recreated group), the old handler's late
 // teardown must not mark that live bridge offline in the auth server.
 func (m *GroupManager) HasLiveBridgeWithID(userID, bridgeID string) bool {
@@ -63,5 +63,5 @@ func (m *GroupManager) HasLiveBridgeWithID(userID, bridgeID string) bool {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.Bridge != nil && g.Bridge.BridgeID == bridgeID
+	return g.Bridges[bridgeID] != nil
 }

@@ -2,13 +2,13 @@
 
 WebSocket relay server for proxying encrypted traffic between the [Sesori Bridge CLI](https://github.com/sesori-ai/sesori_bridge) running on a laptop and the [Sesori mobile app](https://github.com/sesori-ai/sesori_mobile) running on a phone.
 
-The relay routes traffic by account — connections are grouped by the `userId` extracted from a JWT token, so a bridge and up to 5 phones belonging to the same account can exchange data without the relay reading any of it. All payload data is end-to-end encrypted (XChaCha20-Poly1305) and the relay server **cannot** read any of it.
+The relay routes traffic by account — connections are grouped by the `userId` extracted from a JWT token, so up to 10 bridges (computers) and up to 5 phones belonging to the same account can exchange data without the relay reading any of it. All payload data is end-to-end encrypted (XChaCha20-Poly1305) and the relay server **cannot** read any of it.
 
 ## How it works
 
 1. Bridge CLI connects to `/ws` and sends an auth message with a signed JWT, role `"bridge"`, and its `bridgeId`
-2. Phone connects to `/ws` and sends an auth message with a signed JWT and role `"phone"`
-3. Relay extracts `userId` from each JWT and groups connections by account — 1 bridge + up to 5 phones per account
+2. Phone connects to `/ws` and sends an auth message with a signed JWT, role `"phone"`, and optionally the `bridgeId` it wants to talk to
+3. Relay extracts `userId` from each JWT and groups connections by account — up to 10 bridges + up to 5 phones per account. Each phone talks to its pinned bridge, or to the most recently connected bridge when it names none
 4. Binary frames from phone → relay → bridge carry a 2-byte `connId` prefix so the bridge can address replies back to the correct phone
 5. Control messages notify each side when the other connects or disconnects (`bridge_connected`, `bridge_disconnected`, `phone_connected`, `phone_disconnected`)
 6. Group is torn down when all connections close — no state is persisted
@@ -19,7 +19,7 @@ The relay routes traffic by account — connections are grouped by the `userId` 
 Phone ←──(encrypted)──→ Relay Server ←──(encrypted)──→ Bridge CLI → opencode serve
 ```
 
-- **Account groups**: Connections are grouped by `userId` from the JWT. Each group holds 1 bridge + up to 5 phones.
+- **Account groups**: Connections are grouped by `userId` from the JWT. Each group holds up to 10 bridges (keyed by `bridgeId`; a reconnect with the same id replaces the previous connection with close code `4007`) + up to 5 phones.
 - **Rate limiting**: Max 20 connections per resolved client IP, max 10,000 active groups globally.
 - **No storage**: The relay holds no state beyond active WebSocket connections. Nothing is persisted.
 
@@ -91,8 +91,11 @@ Every client sends this as the first WebSocket message (plaintext JSON):
 Both roles authenticate with the user's **access token** (`tokenType:
 "access"`, `aud: "mobile"`); no other token type is accepted.
 
-The `bridgeId` field is required for `role: "bridge"` and ignored for
-`role: "phone"`. Its format is `^br_[A-Za-z0-9_-]{8,32}$`. The relay
+The `bridgeId` field is required for `role: "bridge"` and optional for
+`role: "phone"`, where it pins the bridge the phone talks to; a phone that
+names no bridge follows the most recently connected one and moves (with a
+`bridge_connected` notice) when that changes. A pinned phone whose bridge is
+offline gets `bridge_disconnected` until that bridge connects. Its format is `^br_[A-Za-z0-9_-]{8,32}$`. The relay
 does not validate the value
 against any database at handshake time; it forwards it to the auth
 server in the bridge-status report. If the auth server answers that
@@ -125,7 +128,7 @@ status reporting retain their separate existing lifecycle behavior.
 
 ### Data frames (binary)
 
-Binary frames from phone → relay → bridge are prefixed with a 2-byte big-endian `connId`. The bridge uses this to address responses back to the correct phone. `connId == 0` is a broadcast from bridge to all connected phones.
+Binary frames from phone → relay → bridge are prefixed with a 2-byte big-endian `connId`. The bridge uses this to address responses back to the correct phone. `connId == 0` is a broadcast from a bridge to all phones that talk to it; a bridge never reaches a phone that talks to another bridge.
 
 ### Encryption protocol
 

@@ -49,7 +49,7 @@ type RoleAuthMessage struct {
 	Type                         string `json:"type"` // "auth"
 	Token                        string `json:"token"`
 	Role                         string `json:"role"`               // "bridge" or "phone"
-	BridgeID                     string `json:"bridgeId,omitempty"` // required for bridges, ignored for phones. Format: ^br_[A-Za-z0-9_-]{8,32}$.
+	BridgeID                     string `json:"bridgeId,omitempty"` // required for bridges; optional for phones, where it pins the bridge to talk to (absent: the most recently connected bridge). Format: ^br_[A-Za-z0-9_-]{8,32}$.
 	ConnectionNotificationPolicy string `json:"connectionNotificationPolicy,omitempty"`
 }
 
