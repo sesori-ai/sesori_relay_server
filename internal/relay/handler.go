@@ -26,11 +26,13 @@ const (
 	maxPhonesPerAccount  = 5
 	maxBridgesPerAccount = 10
 	pingInterval         = 30 * time.Second
-	// controlWriteTimeout bounds each control-message write, so a peer that
-	// stopped reading cannot stall the handler fanning out notices (an expired
-	// write closes that peer's connection; it reconnects).
-	controlWriteTimeout  = 5 * time.Second
-	cfConnectingIPHeader = "CF-Connecting-IP"
+	// writeTimeout plus writeAllowanceBytesPerSecond bound every write to a
+	// peer (see writeOrDrop), so a peer that stopped reading cannot stall the
+	// loop forwarding to it or fanning out notices. The per-byte allowance keeps
+	// a large frame to a slow but live peer from being cut off.
+	writeTimeout                 = 5 * time.Second
+	writeAllowanceBytesPerSecond = 64 * 1024
+	cfConnectingIPHeader         = "CF-Connecting-IP"
 )
 
 type clientIPSource string
@@ -374,7 +376,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		// the read loop (see PhonesTargeting for the residual window).
 		if connID == 0 {
 			for _, target := range group.PhonesTargeting(newConn) {
-				_ = target.Conn.Write(ctx, websocket.MessageBinary, payload)
+				writeOrDrop(ctx, target, websocket.MessageBinary, payload)
 			}
 			continue
 		}
@@ -383,7 +385,7 @@ func handleBridge(ctx context.Context, conn *websocket.Conn, group *AccountGroup
 		if target == nil {
 			continue
 		}
-		_ = target.Conn.Write(ctx, websocket.MessageBinary, payload)
+		writeOrDrop(ctx, target, websocket.MessageBinary, payload)
 	}
 }
 
@@ -450,7 +452,7 @@ func handlePhone(ctx context.Context, conn *websocket.Conn, group *AccountGroup,
 		framed := make([]byte, 2+len(data))
 		binary.BigEndian.PutUint16(framed[:2], connID)
 		copy(framed[2:], data)
-		_ = bridge.Conn.Write(ctx, websocket.MessageBinary, framed)
+		writeOrDrop(ctx, bridge, websocket.MessageBinary, framed)
 	}
 }
 
@@ -490,9 +492,31 @@ func writeControl(ctx context.Context, conn *Connection, message any) {
 		slog.Error("failed to marshal control message", "err", err)
 		return
 	}
-	writeCtx, cancel := context.WithTimeout(ctx, controlWriteTimeout)
+	writeOrDrop(ctx, conn, websocket.MessageText, data)
+}
+
+// writeOrDrop writes one message to conn within a size-scaled deadline. A
+// failed write closes conn, so a stalled peer cannot keep blocking the loop
+// that forwards to it (or the other peers behind that loop); the peer's own
+// handler then runs its normal disconnect cleanup and the client reconnects.
+// coder/websocket serializes concurrent writes on one connection itself.
+func writeOrDrop(ctx context.Context, conn *Connection, typ websocket.MessageType, data []byte) {
+	timeout := writeTimeout + time.Duration(len(data))*time.Second/writeAllowanceBytesPerSecond
+	writeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	_ = conn.Conn.Write(writeCtx, websocket.MessageText, data)
+	err := conn.Conn.Write(writeCtx, typ, data)
+	if err == nil || ctx.Err() != nil {
+		// Delivered, or the writing side is shutting down and the target did
+		// nothing wrong.
+		return
+	}
+	// A deadline expiring mid-frame can also surface as net.ErrClosed, so check
+	// the deadline first; a plain net.ErrClosed is a peer that already left.
+	if writeCtx.Err() != nil || !errors.Is(err, net.ErrClosed) {
+		slog.Warn("write to peer failed; closing connection", "error", err,
+			"connId", conn.ConnID, "bridgeId", conn.BridgeID, "bytes", len(data), "timeout", timeout)
+	}
+	_ = conn.Conn.CloseNow()
 }
 
 // One sender and one pending latest-value report per socket. The socket read

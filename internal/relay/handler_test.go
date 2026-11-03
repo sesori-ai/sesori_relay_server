@@ -666,6 +666,66 @@ func TestHandler_PhoneToBridge(t *testing.T) {
 	}
 }
 
+// A phone that stops reading fills the relay's socket buffers until the
+// forwarding write blocks. The write deadline must then close that phone, so
+// the bridge's read loop keeps serving its other phones.
+func TestHandler_StalledPhoneIsClosedAndDoesNotBlockOthers(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	bridge := env.connectBridge(t, "user1")
+	defer bridge.CloseNow()
+
+	stalled, _ := env.connectPhone(t, "user1")
+	defer stalled.CloseNow()
+	stalledConnID := uint16(parseJSON(t, readTextMsg(t, bridge, 2*time.Second))["connId"].(float64))
+
+	healthy, _ := env.connectPhone(t, "user1")
+	defer healthy.CloseNow()
+	healthyConnID := uint16(parseJSON(t, readTextMsg(t, bridge, 2*time.Second))["connId"].(float64))
+
+	// The stalled phone never reads. 32 MiB is far beyond loopback socket
+	// buffers, so the relay's write to it blocks until the deadline.
+	const frameSize = 64 * 1024
+	frame := make([]byte, 2+frameSize)
+	binary.BigEndian.PutUint16(frame[:2], stalledConnID)
+	floodDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < 512; i++ {
+			if err := bridge.Write(ctx, websocket.MessageBinary, frame); err != nil {
+				floodDone <- err
+				return
+			}
+		}
+		floodDone <- nil
+	}()
+
+	// The deadline is per write, and the kernel sometimes lets one more write
+	// trickle through before the window stays shut, so allow a few deadlines.
+	deadline := writeTimeout + time.Second*frameSize/writeAllowanceBytesPerSecond
+	disconnected := parseJSON(t, readTextMsg(t, bridge, 3*deadline))
+	if disconnected["type"] != "phone_disconnected" || uint16(disconnected["connId"].(float64)) != stalledConnID {
+		t.Fatalf("expected phone_disconnected for connId %d, got %v", stalledConnID, disconnected)
+	}
+	select {
+	case err := <-floodDone:
+		if err != nil {
+			t.Fatalf("bridge flood write: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("bridge writes stayed blocked after the stalled phone was closed")
+	}
+
+	payload := []byte("still-flowing")
+	unicast := append(binary.BigEndian.AppendUint16(nil, healthyConnID), payload...)
+	if err := bridge.Write(ctx, websocket.MessageBinary, unicast); err != nil {
+		t.Fatalf("bridge write: %v", err)
+	}
+	if got := readBinaryMsg(t, healthy, 2*time.Second); string(got) != string(payload) {
+		t.Errorf("healthy phone: expected %q, got %q", payload, got)
+	}
+}
+
 func TestHandler_BridgeDisconnect_NotifiesPhones(t *testing.T) {
 	env := newTestEnv(t)
 
