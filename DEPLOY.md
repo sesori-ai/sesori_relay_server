@@ -2,6 +2,15 @@
 
 This guide covers deploying the remote relay server to production environments.
 
+## Sesori Production
+
+The hosted relay at `relay.sesori.com` runs on DigitalOcean App Platform and
+deploys automatically when a PR merges to `master`. Merging is shipping: there
+is no manual deploy step. A deploy restarts the relay, so every connected app
+and bridge reconnects once.
+
+The Fly.io and VPS sections below are for self-hosting your own relay.
+
 ## Quick Start (Local Development)
 
 ```bash
