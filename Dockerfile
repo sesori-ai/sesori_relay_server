@@ -1,6 +1,6 @@
 # Multi-stage build for Go relay server
 # Stage 1: Builder
-FROM golang:1.23-alpine AS builder
+FROM golang:1.27-alpine3.24 AS builder
 
 WORKDIR /build
 
@@ -20,7 +20,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /relay ./cmd/relay/
 
 # Stage 2: Runtime
-FROM alpine:3.19
+FROM alpine:3.24
 
 # Install runtime dependencies
 RUN apk add --no-cache ca-certificates

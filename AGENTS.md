@@ -56,6 +56,6 @@ go vet ./...                   # Static analysis
 
 ## DEPLOYMENT
 
-- **Docker**: Multi-stage build (golang:1.23-alpine → alpine:3.19), non-root user `relay:relay`
+- **Docker**: Multi-stage build (golang:1.27-alpine3.24 → alpine:3.24), non-root user `relay:relay`
 - **Health**: `GET /health` → `{"status":"ok","groups":N,"connections":N}`
 - See `DEPLOY.md` for Fly.io and VPS (Docker + Caddy) guides
