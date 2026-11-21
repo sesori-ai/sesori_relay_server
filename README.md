@@ -140,6 +140,6 @@ Binary frames from phone → relay → bridge are prefixed with a 2-byte big-end
 
 ## Tech stack
 
-- Go 1.23
+- Go 1.27
 - [`coder/websocket`](https://github.com/coder/websocket) for WebSocket handling
 - No external databases or message brokers
